@@ -2,9 +2,11 @@ etc/pipewire
 lib/udev/rules.d
 usr/bin/pipewire
 usr/bin/pipewire-media-session
+usr/bin/pipewire-pulse
 usr/bin/pw-cat
 usr/bin/pw-cli
 usr/bin/pw-dot
+usr/bin/pw-dump
 usr/bin/pw-metadata
 usr/bin/pw-mididump
 usr/bin/pw-midiplay
@@ -14,6 +16,7 @@ usr/bin/pw-play
 usr/bin/pw-profiler
 usr/bin/pw-record
 usr/bin/pw-reserve
+usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
 usr/share/man/man1/pipewire.*
