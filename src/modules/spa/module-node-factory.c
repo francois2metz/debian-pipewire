@@ -63,6 +63,7 @@ struct node_data {
 	struct pw_impl_node *node;
 	struct spa_hook node_listener;
 	struct spa_hook resource_listener;
+	unsigned int linger:1;
 };
 
 static void resource_destroy(void *data)
@@ -70,7 +71,7 @@ static void resource_destroy(void *data)
 	struct node_data *nd = data;
 	pw_log_debug("node %p", nd);
 	spa_hook_remove(&nd->resource_listener);
-	if (nd->node)
+	if (nd->node && !nd->linger)
 		pw_impl_node_destroy(nd->node);
 }
 
@@ -103,10 +104,11 @@ static void *create_object(void *_data,
 	struct factory_data *data = _data;
 	struct pw_context *context = data->context;
 	struct pw_impl_node *node;
-	const char *factory_name;
+	const char *factory_name, *str;
 	struct node_data *nd;
 	int res;
 	struct pw_impl_client *client;
+	bool linger;
 
 	if (properties == NULL)
 		goto error_properties;
@@ -124,6 +126,8 @@ static void *create_object(void *_data,
 		pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d",
 			pw_global_get_id(pw_impl_client_get_global(client)));
 	}
+	str = pw_properties_get(properties, PW_KEY_OBJECT_LINGER);
+	linger = str ? pw_properties_parse_bool(str) : false;
 
 	node = pw_spa_node_load(context,
 				factory_name,
@@ -136,6 +140,7 @@ static void *create_object(void *_data,
 	nd = pw_spa_node_get_user_data(node);
 	nd->data = data;
 	nd->node = node;
+	nd->linger = linger;
 	spa_list_append(&data->node_list, &nd->link);
 
 	pw_impl_node_add_listener(node, &nd->node_listener, &node_events, nd);
@@ -192,10 +197,10 @@ static void factory_destroy(void *_data)
 	struct factory_data *data = _data;
 	struct node_data *nd;
 
-	spa_hook_remove(&data->module_listener);
-
+	spa_hook_remove(&data->factory_listener);
 	spa_list_consume(nd, &data->node_list, link)
 		pw_impl_node_destroy(nd->node);
+	data->this = NULL;
 }
 
 static const struct pw_impl_factory_events factory_events = {
@@ -206,7 +211,9 @@ static const struct pw_impl_factory_events factory_events = {
 static void module_destroy(void *_data)
 {
 	struct factory_data *data = _data;
-	pw_impl_factory_destroy(data->this);
+	spa_hook_remove(&data->module_listener);
+	if (data->this)
+		pw_impl_factory_destroy(data->this);
 }
 
 static void module_registered(void *data)

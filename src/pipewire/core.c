@@ -68,7 +68,7 @@ static void core_event_error(void *data, uint32_t id, int seq, int res, const ch
 
 	proxy = pw_map_lookup(&this->objects, id);
 
-	pw_log_error(NAME" %p: proxy %p id:%u: bound:%d seq:%d res:%d (%s) msg:\"%s\"",
+	pw_log_debug(NAME" %p: proxy %p id:%u: bound:%d seq:%d res:%d (%s) msg:\"%s\"",
 			this, proxy, id, proxy ? proxy->bound_id : SPA_ID_INVALID,
 			seq, res, spa_strerror(res), message);
 	if (proxy)
@@ -250,6 +250,9 @@ static void proxy_core_destroy(void *data)
 
 	pw_log_debug(NAME" %p: free", core);
 	pw_properties_free(core->properties);
+
+	spa_hook_remove(&core->core_listener);
+	spa_hook_remove(&core->proxy_core_listener);
 }
 
 static const struct pw_proxy_events proxy_core_events = {

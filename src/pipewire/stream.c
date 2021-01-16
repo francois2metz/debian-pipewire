@@ -49,6 +49,10 @@
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 #define MAX_PORTS	1
 
+static bool mlock_warned = false;
+
+static uint32_t mappable_dataTypes = (1<<SPA_DATA_MemFd);
+
 struct buffer {
 	struct pw_buffer this;
 	uint32_t id;
@@ -176,6 +180,28 @@ static struct param *add_param(struct stream *impl,
 	p = malloc(sizeof(struct param) + SPA_POD_SIZE(param));
 	if (p == NULL)
 		return NULL;
+
+	if (id == SPA_PARAM_Buffers && SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_MAP_BUFFERS) &&
+		impl->direction == SPA_DIRECTION_INPUT)
+	{
+		const struct spa_pod_prop *pod_param;
+		uint32_t dataType = 0;
+
+		pod_param = spa_pod_find_prop(param, NULL, SPA_PARAM_BUFFERS_dataType);
+		if (pod_param != NULL)
+		{
+			spa_pod_get_int(&pod_param->value, (int32_t*)&dataType);
+			pw_log_debug(NAME" dataType: %d", dataType);
+			if ((dataType & (1<<SPA_DATA_MemPtr)) > 0)
+			{
+				pw_log_debug(NAME" Change dataType");
+				struct spa_pod_int *int_pod = (struct spa_pod_int*)&pod_param->value;
+				dataType = dataType | mappable_dataTypes;
+				pw_log_debug(NAME" dataType: %d", dataType);
+				int_pod->value = dataType;
+			}
+		}
+	}
 
 	p->id = id;
 	p->flags = flags;
@@ -386,6 +412,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Suspend:
+	case SPA_NODE_COMMAND_Flush:
 	case SPA_NODE_COMMAND_Pause:
 		pw_loop_invoke(impl->context->main_loop,
 			NULL, 0, NULL, 0, false, impl);
@@ -406,6 +433,9 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 			stream_set_state(stream, PW_STREAM_STATE_STREAMING, NULL);
 		}
+		break;
+	case SPA_NODE_COMMAND_ParamBegin:
+	case SPA_NODE_COMMAND_ParamEnd:
 		break;
 	default:
 		pw_log_warn(NAME" %p: unhandled node command %d", stream,
@@ -561,12 +591,15 @@ static int map_data(struct stream *impl, struct spa_data *data, int prot)
 			range.offset, range.size, data->data);
 
 	if (impl->allow_mlock && mlock(data->data, data->maxsize) < 0) {
-		pw_log(impl->process_rt ? SPA_LOG_LEVEL_WARN : SPA_LOG_LEVEL_DEBUG,
-				NAME" %p: Failed to mlock memory %p %u: %s", impl,
-				data->data, data->maxsize,
-				errno == ENOMEM ?
-				"This is not a problem but for best performance, "
-				"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+		if (errno != ENOMEM || !mlock_warned) {
+			pw_log(impl->process_rt ? SPA_LOG_LEVEL_WARN : SPA_LOG_LEVEL_DEBUG,
+					NAME" %p: Failed to mlock memory %p %u: %s", impl,
+					data->data, data->maxsize,
+					errno == ENOMEM ?
+					"This is not a problem but for best performance, "
+					"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+			mlock_warned |= errno == ENOMEM;
+		}
 	}
 	return 0;
 }
@@ -673,13 +706,12 @@ static int impl_port_use_buffers(void *object,
 		if (SPA_FLAG_IS_SET(impl_flags, PW_STREAM_FLAG_MAP_BUFFERS)) {
 			for (j = 0; j < buffers[i]->n_datas; j++) {
 				struct spa_data *d = &buffers[i]->datas[j];
-				if (d->type == SPA_DATA_MemFd ||
-				    d->type == SPA_DATA_DmaBuf) {
+				if ((mappable_dataTypes & (1<<d->type)) > 0) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				}
-				else if (d->data == NULL) {
+				else if (d->type == SPA_DATA_MemPtr && d->data == NULL) {
 					pw_log_error(NAME" %p: invalid buffer mem", stream);
 					return -EINVAL;
 				}
@@ -904,9 +936,8 @@ static int node_event_param(void *object, int seq,
 	{
 		struct control *c;
 		const struct spa_pod *type, *pod;
-		uint32_t iid, choice, n_vals;
+		uint32_t iid, choice, n_vals, container = SPA_ID_INVALID;
 		float *vals, bool_range[3] = { 1.0, 0.0, 1.0 };
-		const struct spa_type_info *tinfo;
 
 		if (spa_pod_parse_object(param,
 					SPA_TYPE_OBJECT_PropInfo, NULL,
@@ -927,7 +958,8 @@ static int node_event_param(void *object, int seq,
 		if (spa_pod_parse_object(c->info,
 					SPA_TYPE_OBJECT_PropInfo, NULL,
 					SPA_PROP_INFO_name, SPA_POD_String(&c->control.name),
-					SPA_PROP_INFO_type, SPA_POD_PodChoice(&type)) < 0) {
+					SPA_PROP_INFO_type, SPA_POD_PodChoice(&type),
+					SPA_PROP_INFO_container, SPA_POD_OPT_Id(&container)) < 0) {
 			free(c);
 			return -EINVAL;
 		}
@@ -948,8 +980,7 @@ static int node_event_param(void *object, int seq,
 		else
 			return -ENOTSUP;
 
-		tinfo = spa_debug_type_find(spa_type_props, iid);
-		c->container = tinfo ? tinfo->parent : c->type;
+		c->container = container != SPA_ID_INVALID ? container : c->type;
 
 		switch (choice) {
 		case SPA_CHOICE_None:
@@ -1304,6 +1335,9 @@ void pw_stream_destroy(struct pw_stream *stream)
 		spa_list_remove(&c->link);
 		free(c);
 	}
+
+	spa_hook_list_clean(&impl->hooks);
+	spa_hook_list_clean(&stream->listener_list);
 
 	spa_hook_remove(&impl->context_listener);
 
@@ -1867,8 +1901,8 @@ do_flush(struct spa_loop *loop,
 	}
 	while (b);
 
-	impl->time.queued = impl->queued.outcount = impl->dequeued.incount =
-		impl->dequeued.outcount = impl->queued.incount;
+	impl->queued.outcount = impl->dequeued.incount =
+		impl->dequeued.outcount = impl->queued.incount = 0;
 
 	return 0;
 }
@@ -1889,5 +1923,8 @@ int pw_stream_flush(struct pw_stream *stream, bool drain)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	pw_loop_invoke(impl->context->data_loop,
 			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
+	if (!drain)
+		spa_node_send_command(impl->node->node,
+				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Flush));
 	return 0;
 }

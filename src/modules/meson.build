@@ -67,10 +67,10 @@ pipewire_module_link_factory = shared_library('pipewire-module-link-factory',
   dependencies : [mathlib, dl_lib, pipewire_dep],
 )
 
-pipewire_module_protocol_native_deps = [mathlib, dl_lib, pipewire_dep]
+pipewire_module_protocol_deps = [mathlib, dl_lib, pipewire_dep]
 
 if get_option('systemd')
-  pipewire_module_protocol_native_deps += systemd_dep
+  pipewire_module_protocol_deps += systemd_dep
 endif
 
 pipewire_module_protocol_native = shared_library('pipewire-module-protocol-native',
@@ -85,8 +85,14 @@ pipewire_module_protocol_native = shared_library('pipewire-module-protocol-nativ
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : pipewire_module_protocol_native_deps,
+  dependencies : pipewire_module_protocol_deps,
 )
+
+pipewire_module_protocol_pulse_deps = pipewire_module_protocol_deps
+
+if dbus_dep.found()
+  pipewire_module_protocol_pulse_deps += dbus_dep
+endif
 
 pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse',
   [ 'module-protocol-pulse.c',
@@ -97,7 +103,7 @@ pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse'
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, pipewire_dep],
+  dependencies : pipewire_module_protocol_pulse_deps,
 )
 
 pipewire_module_client_node = shared_library('pipewire-module-client-node',

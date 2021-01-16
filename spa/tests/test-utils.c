@@ -23,6 +23,7 @@
  */
 
 #include <spa/utils/defs.h>
+#include <spa/utils/result.h>
 #include <spa/utils/dict.h>
 #include <spa/utils/list.h>
 #include <spa/utils/hook.h>
@@ -139,6 +140,23 @@ static void test_macros(void)
 	spa_assert(SPA_CLAMP(23, 1, 16) == 16);
 	spa_assert(SPA_CLAMP(-1, 1, 16) == 1);
 	spa_assert(SPA_CLAMP(8, 1, 16) == 8);
+}
+
+static void test_result(void)
+{
+	int res;
+	spa_assert(SPA_RESULT_IS_OK(0) == true);
+	spa_assert(SPA_RESULT_IS_OK(1) == true);
+	spa_assert(SPA_RESULT_IS_ERROR(0) == false);
+	spa_assert(SPA_RESULT_IS_ERROR(1) == false);
+	spa_assert(SPA_RESULT_IS_ERROR(-1) == true);
+	spa_assert(SPA_RESULT_IS_ASYNC(-1) == false);
+	spa_assert(SPA_RESULT_IS_ASYNC(0) == false);
+	res = SPA_RESULT_RETURN_ASYNC(11);
+	spa_assert(SPA_RESULT_IS_ASYNC(res) == true);
+	spa_assert(SPA_RESULT_IS_ERROR(res) == false);
+	spa_assert(SPA_RESULT_IS_OK(res) == true);
+	spa_assert(SPA_RESULT_ASYNC_SEQ(res) == 11);
 }
 
 static void test_dict(void)
@@ -291,12 +309,12 @@ static void test_hook(void)
     spa_hook_list_init(&hl);
 
     h = malloc(sizeof(struct spa_hook));
-    h->removed = hook_removed_cb;
     spa_hook_list_append(&hl, h, &callbacks[1], &data);
+    h->removed = hook_removed_cb;
 
     h = malloc(sizeof(struct spa_hook));
-    h->removed = hook_removed_cb;
     spa_hook_list_append(&hl, h, &callbacks[2], &data);
+    h->removed = hook_removed_cb;
 
     /* iterate with the simple API */
     spa_hook_list_call_simple(&hl, struct my_hook, invoke, VERSION);
@@ -308,8 +326,8 @@ static void test_hook(void)
     memset(&data, 0, sizeof(struct my_hook_data));
 
     h = malloc(sizeof(struct spa_hook));
-    h->removed = hook_removed_cb;
     spa_hook_list_prepend(&hl, h, &callbacks[0], &data);
+    h->removed = hook_removed_cb;
 
     /* call only the first hook - this should be callback_1 */
     count = spa_hook_list_call_once(&hl, struct my_hook, invoke, VERSION);
@@ -323,8 +341,8 @@ static void test_hook(void)
 
     /* add callback_4 - this is version 1, so it shouldn't be executed */
     h = malloc(sizeof(struct spa_hook));
-    h->removed = hook_removed_cb;
     spa_hook_list_append(&hl, h, &callbacks[3], &data);
+    h->removed = hook_removed_cb;
 
     count = spa_hook_list_call(&hl, struct my_hook, invoke, VERSION);
     spa_assert(count == 3);
@@ -405,6 +423,7 @@ int main(int argc, char *argv[])
 {
     test_abi();
     test_macros();
+    test_result();
     test_dict();
     test_list();
     test_hook();

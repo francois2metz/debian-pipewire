@@ -248,6 +248,17 @@ static void update_rate_match(struct impl *this)
 	}
 }
 
+static void reset_node(struct impl *this)
+{
+	struct port *outport, *inport;
+	outport = GET_OUT_PORT(this, 0);
+	inport = GET_IN_PORT(this, 0);
+
+	resample_reset(&this->resample);
+	outport->offset = 0;
+	inport->offset = 0;
+}
+
 static int impl_node_send_command(void *object, const struct spa_command *command)
 {
 	struct impl *this = object;
@@ -262,9 +273,10 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		update_rate_match(this);
 		break;
 	case SPA_NODE_COMMAND_Suspend:
-		SPA_FALLTHROUGH
+	case SPA_NODE_COMMAND_Flush:
+		reset_node(this);
+		SPA_FALLTHROUGH;
 	case SPA_NODE_COMMAND_Pause:
-		resample_reset(&this->resample);
 		this->started = false;
 		break;
 	default:
@@ -982,6 +994,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->info = SPA_NODE_INFO_INIT();
 	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS;
+	this->info.max_input_ports = 1;
+	this->info.max_output_ports = 1;
 	this->info.flags = SPA_NODE_FLAG_RT;
 
 	port = GET_OUT_PORT(this, 0);

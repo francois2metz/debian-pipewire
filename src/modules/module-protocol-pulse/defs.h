@@ -30,6 +30,11 @@
 #define FLAG_SEEKMASK			0x000000FFLU
 #define FLAG_SHMWRITABLE		0x00800000LU
 
+#define SEEK_RELATIVE		0
+#define SEEK_ABSOLUTE		1
+#define SEEK_RELATIVE_ON_READ	2
+#define SEEK_RELATIVE_END	3
+
 #define FRAME_SIZE_MAX_ALLOW (1024*1024*16)
 
 #define PROTOCOL_FLAG_MASK	0xffff0000u
@@ -42,13 +47,24 @@
 #define MIN_BUFFERS     8u
 #define MAX_BUFFERS     64u
 
-#define MIN_SAMPLES	24u
+#define MIN_BLOCK	64u
+#define MIN_SAMPLES	16u
 #define MIN_USEC	(MIN_SAMPLES * SPA_USEC_PER_SEC / 48000u)
 
 #define MAXLENGTH		(4*1024*1024) /* 4MB */
 #define DEFAULT_TLENGTH_MSEC	2000 /* 2s */
 #define DEFAULT_PROCESS_MSEC	20   /* 20ms */
 #define DEFAULT_FRAGSIZE_MSEC	DEFAULT_TLENGTH_MSEC
+
+#define SCACHE_ENTRY_SIZE_MAX	(1024*1024*16)
+
+#define INDEX_MASK		0xffffu
+#define MONITOR_FLAG		(1u << 16)
+#define EXTENSION_FLAG		(1u << 17)
+
+#define DEFAULT_SINK		"@DEFAULT_SINK@"
+#define DEFAULT_SOURCE		"@DEFAULT_SOURCE@"
+#define DEFAULT_MONITOR		"@DEFAULT_MONITOR@"
 
 enum error_code {
 	ERR_OK = 0,			/**< No error */
@@ -85,20 +101,27 @@ static inline int res_to_err(int res)
 {
 	switch (res) {
 	case 0: return ERR_OK;
-	case -EACCES: return ERR_ACCESS;
+	case -EACCES: case -EPERM: return ERR_ACCESS;
 	case -ENOTTY: return ERR_COMMAND;
 	case -EINVAL: return ERR_INVALID;
 	case -EEXIST: return ERR_EXIST;
-	case -ENOENT: return ERR_NOENTITY;
-	case -ECONNREFUSED: return ERR_CONNECTIONREFUSED;
-	case -EPROTO: return ERR_PROTOCOL;
-	case -ETIMEDOUT: return ERR_TIMEOUT;
+	case -ENOENT: case -ESRCH: case -ENXIO: case -ENODEV: return ERR_NOENTITY;
+	case -ECONNREFUSED: case -ENONET: case -EHOSTDOWN: case -ENETDOWN: return ERR_CONNECTIONREFUSED;
+	case -EPROTO: case -EBADMSG: return ERR_PROTOCOL;
+	case -ETIMEDOUT: case -ETIME: return ERR_TIMEOUT;
+#ifdef ENOKEY
 	case -ENOKEY: return ERR_AUTHKEY;
-	case -ECONNRESET: return ERR_CONNECTIONTERMINATED;
+#endif
+	case -ECONNRESET: case -EPIPE: return ERR_CONNECTIONTERMINATED;
+#ifdef EBADFD
 	case -EBADFD: return ERR_BADSTATE;
+#endif
+#ifdef ENODATA
 	case -ENODATA: return ERR_NODATA;
-	case -EOVERFLOW: return ERR_TOOLARGE;
-	case -ENOTSUP: return ERR_NOTSUPPORTED;
+#endif
+	case -EOVERFLOW: case -E2BIG: case -EFBIG:
+	case -ERANGE: case -ENAMETOOLONG: return ERR_TOOLARGE;
+	case -ENOTSUP: case -EPROTONOSUPPORT: case -ESOCKTNOSUPPORT: return ERR_NOTSUPPORTED;
 	case -ENOSYS: return ERR_NOTIMPLEMENTED;
 	case -EIO: return ERR_IO;
 	case -EBUSY: return ERR_BUSY;

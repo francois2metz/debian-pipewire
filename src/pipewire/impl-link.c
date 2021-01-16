@@ -1064,6 +1064,8 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	this = &impl->this;
 	this->feedback = pw_impl_node_can_reach(input_node, output_node);
+	pw_properties_set(properties, PW_KEY_LINK_FEEDBACK, this->feedback ? "true" : NULL);
+
 	pw_log_debug(NAME" %p: new out-port:%p -> in-port:%p", this, output, input);
 
 	if (user_data_size > 0)
@@ -1139,7 +1141,7 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	try_link_controls(impl, output, input);
 
-	pw_impl_node_emit_peer_added(output_node, input_node);
+	pw_impl_node_emit_peer_added(impl->onode, impl->inode);
 
 	return this;
 
@@ -1266,7 +1268,7 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 	if (link->registered)
 		spa_list_remove(&link->link);
 
-	pw_impl_node_emit_peer_removed(link->output->node, link->input->node);
+	pw_impl_node_emit_peer_removed(impl->onode, impl->inode);
 
 	try_unlink_controls(impl, link->output, link->input);
 
@@ -1283,6 +1285,8 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 
 	pw_log_debug(NAME" %p: free", impl);
 	pw_impl_link_emit_free(link);
+
+	spa_hook_list_clean(&link->listener_list);
 
 	pw_work_queue_destroy(impl->work);
 

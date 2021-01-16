@@ -32,6 +32,131 @@ void *_acp_log_data;
 
 #define VOLUME_ACCURACY (PA_VOLUME_NORM/100)  /* don't require volume adjustments to be perfectly correct. don't necessarily extend granularity in software unless the differences get greater than this level */
 
+static const uint32_t channel_table[PA_CHANNEL_POSITION_MAX] = {
+	[PA_CHANNEL_POSITION_MONO] = ACP_CHANNEL_MONO,
+
+	[PA_CHANNEL_POSITION_FRONT_LEFT] = ACP_CHANNEL_FL,
+	[PA_CHANNEL_POSITION_FRONT_RIGHT] = ACP_CHANNEL_FR,
+	[PA_CHANNEL_POSITION_FRONT_CENTER] = ACP_CHANNEL_FC,
+
+	[PA_CHANNEL_POSITION_REAR_CENTER] = ACP_CHANNEL_RC,
+	[PA_CHANNEL_POSITION_REAR_LEFT] = ACP_CHANNEL_RL,
+	[PA_CHANNEL_POSITION_REAR_RIGHT] = ACP_CHANNEL_RR,
+
+	[PA_CHANNEL_POSITION_LFE] = ACP_CHANNEL_LFE,
+	[PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER] = ACP_CHANNEL_FLC,
+	[PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER] = ACP_CHANNEL_FRC,
+
+	[PA_CHANNEL_POSITION_SIDE_LEFT] = ACP_CHANNEL_SL,
+	[PA_CHANNEL_POSITION_SIDE_RIGHT] = ACP_CHANNEL_SR,
+
+	[PA_CHANNEL_POSITION_AUX0] = ACP_CHANNEL_CUSTOM_START + 1,
+	[PA_CHANNEL_POSITION_AUX1] = ACP_CHANNEL_CUSTOM_START + 2,
+	[PA_CHANNEL_POSITION_AUX2] = ACP_CHANNEL_CUSTOM_START + 3,
+	[PA_CHANNEL_POSITION_AUX3] = ACP_CHANNEL_CUSTOM_START + 4,
+	[PA_CHANNEL_POSITION_AUX4] = ACP_CHANNEL_CUSTOM_START + 5,
+	[PA_CHANNEL_POSITION_AUX5] = ACP_CHANNEL_CUSTOM_START + 6,
+	[PA_CHANNEL_POSITION_AUX6] = ACP_CHANNEL_CUSTOM_START + 7,
+	[PA_CHANNEL_POSITION_AUX7] = ACP_CHANNEL_CUSTOM_START + 8,
+	[PA_CHANNEL_POSITION_AUX8] = ACP_CHANNEL_CUSTOM_START + 9,
+	[PA_CHANNEL_POSITION_AUX9] = ACP_CHANNEL_CUSTOM_START + 10,
+	[PA_CHANNEL_POSITION_AUX10] = ACP_CHANNEL_CUSTOM_START + 11,
+	[PA_CHANNEL_POSITION_AUX11] = ACP_CHANNEL_CUSTOM_START + 12,
+	[PA_CHANNEL_POSITION_AUX12] = ACP_CHANNEL_CUSTOM_START + 13,
+	[PA_CHANNEL_POSITION_AUX13] = ACP_CHANNEL_CUSTOM_START + 14,
+	[PA_CHANNEL_POSITION_AUX14] = ACP_CHANNEL_CUSTOM_START + 15,
+	[PA_CHANNEL_POSITION_AUX15] = ACP_CHANNEL_CUSTOM_START + 16,
+	[PA_CHANNEL_POSITION_AUX16] = ACP_CHANNEL_CUSTOM_START + 17,
+	[PA_CHANNEL_POSITION_AUX17] = ACP_CHANNEL_CUSTOM_START + 18,
+	[PA_CHANNEL_POSITION_AUX18] = ACP_CHANNEL_CUSTOM_START + 19,
+	[PA_CHANNEL_POSITION_AUX19] = ACP_CHANNEL_CUSTOM_START + 20,
+	[PA_CHANNEL_POSITION_AUX20] = ACP_CHANNEL_CUSTOM_START + 21,
+	[PA_CHANNEL_POSITION_AUX21] = ACP_CHANNEL_CUSTOM_START + 22,
+	[PA_CHANNEL_POSITION_AUX22] = ACP_CHANNEL_CUSTOM_START + 23,
+	[PA_CHANNEL_POSITION_AUX23] = ACP_CHANNEL_CUSTOM_START + 24,
+	[PA_CHANNEL_POSITION_AUX24] = ACP_CHANNEL_CUSTOM_START + 25,
+	[PA_CHANNEL_POSITION_AUX25] = ACP_CHANNEL_CUSTOM_START + 26,
+	[PA_CHANNEL_POSITION_AUX26] = ACP_CHANNEL_CUSTOM_START + 27,
+	[PA_CHANNEL_POSITION_AUX27] = ACP_CHANNEL_CUSTOM_START + 28,
+	[PA_CHANNEL_POSITION_AUX28] = ACP_CHANNEL_CUSTOM_START + 29,
+	[PA_CHANNEL_POSITION_AUX29] = ACP_CHANNEL_CUSTOM_START + 30,
+	[PA_CHANNEL_POSITION_AUX30] = ACP_CHANNEL_CUSTOM_START + 31,
+	[PA_CHANNEL_POSITION_AUX31] = ACP_CHANNEL_CUSTOM_START + 32,
+
+	[PA_CHANNEL_POSITION_TOP_CENTER] = ACP_CHANNEL_TC,
+
+	[PA_CHANNEL_POSITION_TOP_FRONT_LEFT] = ACP_CHANNEL_TFL,
+	[PA_CHANNEL_POSITION_TOP_FRONT_RIGHT] = ACP_CHANNEL_TFR,
+	[PA_CHANNEL_POSITION_TOP_FRONT_CENTER] = ACP_CHANNEL_TFC,
+
+	[PA_CHANNEL_POSITION_TOP_REAR_LEFT] = ACP_CHANNEL_TRL,
+	[PA_CHANNEL_POSITION_TOP_REAR_RIGHT] = ACP_CHANNEL_TRR,
+	[PA_CHANNEL_POSITION_TOP_REAR_CENTER] = ACP_CHANNEL_TRC,
+};
+
+static const char *channel_names[] = {
+	[ACP_CHANNEL_UNKNOWN] = "UNK",
+	[ACP_CHANNEL_NA] = "NA",
+	[ACP_CHANNEL_MONO] = "MONO",
+	[ACP_CHANNEL_FL] = "FL",
+	[ACP_CHANNEL_FR] = "FR",
+	[ACP_CHANNEL_FC] = "FC",
+	[ACP_CHANNEL_LFE] = "LFE",
+	[ACP_CHANNEL_SL] = "SL",
+	[ACP_CHANNEL_SR] = "SR",
+	[ACP_CHANNEL_FLC] = "FLC",
+	[ACP_CHANNEL_FRC] = "FRC",
+	[ACP_CHANNEL_RC] = "RC",
+	[ACP_CHANNEL_RL] = "RL",
+	[ACP_CHANNEL_RR] = "RR",
+	[ACP_CHANNEL_TC] = "TC",
+	[ACP_CHANNEL_TFL] = "TFL",
+	[ACP_CHANNEL_TFC] = "TFC",
+	[ACP_CHANNEL_TFR] = "TFR",
+	[ACP_CHANNEL_TRL] = "TRL",
+	[ACP_CHANNEL_TRC] = "TRC",
+	[ACP_CHANNEL_TRR] = "TRR",
+	[ACP_CHANNEL_RLC] = "RLC",
+	[ACP_CHANNEL_RRC] = "RRC",
+	[ACP_CHANNEL_FLW] = "FLW",
+	[ACP_CHANNEL_FRW] = "FRW",
+	[ACP_CHANNEL_LFE2] = "LFE2",
+	[ACP_CHANNEL_FLH] = "FLH",
+	[ACP_CHANNEL_FCH] = "FCH",
+	[ACP_CHANNEL_FRH] = "FRH",
+	[ACP_CHANNEL_TFLC] = "TFLC",
+	[ACP_CHANNEL_TFRC] = "TFRC",
+	[ACP_CHANNEL_TSL] = "TSL",
+	[ACP_CHANNEL_TSR] = "TSR",
+	[ACP_CHANNEL_LLFE] = "LLFE",
+	[ACP_CHANNEL_RLFE] = "RLFE",
+	[ACP_CHANNEL_BC] = "BC",
+	[ACP_CHANNEL_BLC] = "BLC",
+	[ACP_CHANNEL_BRC] = "BRC",
+};
+
+#define ACP_N_ELEMENTS(arr)	(sizeof(arr) / sizeof((arr)[0]))
+
+static inline uint32_t channel_pa2acp(pa_channel_position_t channel)
+{
+	if (channel < 0 || (size_t)channel >= ACP_N_ELEMENTS(channel_table))
+		return ACP_CHANNEL_UNKNOWN;
+	return channel_table[channel];
+}
+
+char *acp_channel_str(char *buf, size_t len, enum acp_channel ch)
+{
+	if (ch >= ACP_CHANNEL_CUSTOM_START) {
+		snprintf(buf, len, "AUX%d", ch - ACP_CHANNEL_CUSTOM_START);
+	} else if (ch >= ACP_CHANNEL_UNKNOWN && ch <= ACP_CHANNEL_BRC) {
+		snprintf(buf, len, "%s", channel_names[ch]);
+	} else {
+		snprintf(buf, len, "UNK");
+	}
+	return buf;
+}
+
+
 const char *acp_available_str(enum acp_available status)
 {
 	switch (status) {
@@ -56,12 +181,20 @@ const char *acp_direction_str(enum acp_direction direction)
 	return "error";
 }
 
-static void profile_free(void *data)
-{
-}
-
 static void port_free(void *data)
 {
+	pa_device_port *dp = data;
+	pa_dynarray_clear(&dp->devices);
+	pa_dynarray_clear(&dp->prof);
+	pa_device_port_free(dp);
+}
+
+static void device_free(void *data)
+{
+	pa_alsa_device *dev = data;
+	pa_dynarray_clear(&dev->port_array);
+	pa_proplist_free(dev->proplist);
+	pa_hashmap_free(dev->ports);
 }
 
 static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t direction,
@@ -81,7 +214,7 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	dev->device.format.channels = m->channel_map.channels;
 	pa_cvolume_reset(&dev->real_volume, m->channel_map.channels);
 	for (i = 0; i < m->channel_map.channels; i++)
-		dev->device.format.map[i]= m->channel_map.map[i];
+		dev->device.format.map[i]= channel_pa2acp(m->channel_map.map[i]);
 	dev->direction = direction;
 	dev->proplist = pa_proplist_new();
 	pa_proplist_update(dev->proplist, PA_UPDATE_REPLACE, m->proplist);
@@ -101,13 +234,11 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	pa_proplist_setf(dev->proplist, "card.profile.device", "%u", index);
 	pa_proplist_as_dict(dev->proplist, &dev->device.props);
 
-	dev->ports = pa_hashmap_new_full(pa_idxset_string_hash_func,
-			pa_idxset_string_compare_func, NULL,
-			(pa_free_cb_t) port_free);
+	dev->ports = pa_hashmap_new(pa_idxset_string_hash_func,
+			pa_idxset_string_compare_func);
 	if (m->ucm_context.ucm)
 		dev->ucm_context = &m->ucm_context;
 	pa_dynarray_init(&dev->port_array, NULL);
-
 }
 
 static int compare_profile(const void *a, const void *b)
@@ -124,6 +255,17 @@ static int compare_profile(const void *a, const void *b)
 	return p2->profile.priority - p1->profile.priority;
 }
 
+static void profile_free(void *data)
+{
+	pa_alsa_profile *ap = data;
+	pa_dynarray_clear(&ap->out.devices);
+	if (ap->profile.flags & ACP_PROFILE_OFF) {
+		free(ap->name);
+		free(ap->description);
+		free(ap);
+	}
+}
+
 static void add_profiles(pa_card *impl)
 {
 	pa_alsa_profile *ap;
@@ -135,7 +277,7 @@ static void add_profiles(pa_card *impl)
 	uint32_t idx;
 
 	n_devices = 0;
-	pa_dynarray_init(&impl->out.devices, NULL);
+	pa_dynarray_init(&impl->out.devices, device_free);
 
 	ap = pa_xnew0(pa_alsa_profile, 1);
 	ap->profile.name = ap->name = pa_xstrdup("off");
@@ -161,9 +303,12 @@ static void add_profiles(pa_card *impl)
 					init_device(impl, dev, PA_ALSA_DIRECTION_OUTPUT, m, n_devices++);
 					pa_dynarray_append(&impl->out.devices, dev);
 				}
-				if (impl->use_ucm)
-					pa_alsa_ucm_add_ports_combination(dev->ports, &m->ucm_context,
+				if (impl->use_ucm) {
+					pa_alsa_ucm_add_ports_combination(NULL, &m->ucm_context,
 						true, impl->ports, ap, NULL);
+					pa_alsa_ucm_add_ports(&dev->ports, m->proplist, &m->ucm_context,
+						true, impl, dev->pcm_handle, impl->profile_set->ignore_dB);
+				}
 				else
 					pa_alsa_path_set_add_ports(m->output_path_set, ap, impl->ports,
 							dev->ports, NULL);
@@ -180,10 +325,12 @@ static void add_profiles(pa_card *impl)
 					pa_dynarray_append(&impl->out.devices, dev);
 				}
 
-				if (impl->use_ucm)
-					pa_alsa_ucm_add_ports_combination(dev->ports, &m->ucm_context,
-							false, impl->ports, ap, NULL);
-				else
+				if (impl->use_ucm) {
+					pa_alsa_ucm_add_ports_combination(NULL, &m->ucm_context,
+						false, impl->ports, ap, NULL);
+					pa_alsa_ucm_add_ports(&dev->ports, m->proplist, &m->ucm_context,
+						false, impl, dev->pcm_handle, impl->profile_set->ignore_dB);
+				} else
 					pa_alsa_path_set_add_ports(m->input_path_set, ap, impl->ports,
 							dev->ports, NULL);
 
@@ -483,6 +630,7 @@ static void init_jacks(pa_card *impl)
 	void *state;
 	pa_alsa_path* path;
 	pa_alsa_jack* jack;
+	char buf[64];
 
 	impl->jacks = pa_hashmap_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
@@ -526,9 +674,10 @@ static void init_jacks(pa_card *impl)
 		}
 
 		pa_alsa_mixer_use_for_poll(impl->ucm.mixers, jack->mixer_handle);
-		jack->melem = pa_alsa_mixer_find_card(jack->mixer_handle, jack->alsa_name, 0);
+		jack->melem = pa_alsa_mixer_find_card(jack->mixer_handle, &jack->alsa_id, 0);
 		if (!jack->melem) {
-			pa_log_warn("Jack '%s' seems to have disappeared.", jack->alsa_name);
+			pa_alsa_mixer_id_to_string(buf, sizeof(buf), &jack->alsa_id);
+			pa_log_warn("Jack '%s' seems to have disappeared.", buf);
 			pa_alsa_jack_set_has_control(jack, false);
 			continue;
 		}
@@ -855,11 +1004,11 @@ static void set_mute(pa_alsa_device *dev, bool mute)
 	pa_alsa_path_set_mute(dev->mixer_path, dev->mixer_handle, mute);
 }
 
-static void mixer_volume_init(pa_alsa_device *dev)
+static void mixer_volume_init(pa_card *impl, pa_alsa_device *dev)
 {
 	pa_assert(dev);
 
-	if (!dev->mixer_path || !dev->mixer_path->has_volume) {
+	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_volume) {
 		dev->read_volume = NULL;
 		dev->set_volume = NULL;
 		pa_log_info("Driver does not support hardware volume control, "
@@ -902,7 +1051,7 @@ static void mixer_volume_init(pa_alsa_device *dev)
 	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);;
 	dev->device.volume_step = 1.0f / dev->n_volume_steps;
 
-	if (!dev->mixer_path || !dev->mixer_path->has_mute) {
+	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_mute) {
 		dev->read_mute = NULL;
 		dev->set_mute = NULL;
 		pa_log_info("Driver does not support hardware mute control, falling back to software mute control.");
@@ -967,7 +1116,7 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 			return 0;
 	}
 
-	mixer_volume_init(dev);
+	mixer_volume_init(impl, dev);
 
 	/* Will we need to register callbacks? */
 	if (dev->mixer_path_set && dev->mixer_path_set->paths) {
@@ -982,7 +1131,7 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 	else if (dev->mixer_path)
 		need_mixer_callback = dev->mixer_path->has_volume || dev->mixer_path->has_mute;
 
-	if (need_mixer_callback) {
+	if (!impl->soft_mixer && need_mixer_callback) {
 		pa_alsa_mixer_use_for_poll(impl->ucm.mixers, dev->mixer_handle);
 		if (dev->mixer_path_set)
 			pa_alsa_path_set_set_callback(dev->mixer_path_set, dev->mixer_handle, mixer_callback, dev);
@@ -1113,6 +1262,41 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 	return 0;
 }
 
+static void prune_singleton_availability_groups(pa_hashmap *ports) {
+    pa_device_port *p;
+    pa_hashmap *group_counts;
+    void *state, *count;
+    const char *group;
+
+    /* Collect groups and erase those that don't have more than 1 path */
+    group_counts = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        if (p->availability_group) {
+            count = pa_hashmap_get(group_counts, p->availability_group);
+            pa_hashmap_remove(group_counts, p->availability_group);
+            pa_hashmap_put(group_counts, p->availability_group, PA_UINT_TO_PTR(PA_PTR_TO_UINT(count) + 1));
+        }
+    }
+
+    /* Now we have an availability_group -> count map, let's drop all groups
+     * that have only one member */
+    PA_HASHMAP_FOREACH_KV(group, count, group_counts, state) {
+        if (count == PA_UINT_TO_PTR(1))
+            pa_hashmap_remove(group_counts, group);
+    }
+
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        if (p->availability_group && !pa_hashmap_get(group_counts, p->availability_group)) {
+            pa_log_debug("Pruned singleton availability group %s from port %s", p->availability_group, p->name);
+            pa_xfree(p->availability_group);
+            p->availability_group = NULL;
+        }
+    }
+
+    pa_hashmap_free(group_counts);
+}
+
 static const char *acp_dict_lookup(const struct acp_dict *dict, const char *key)
 {
 	const struct acp_dict_item *it;
@@ -1152,6 +1336,8 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
 			impl->use_ucm = (strcmp(s, "true") == 0 || atoi(s) == 1);
+		if ((s = acp_dict_lookup(props, "api.alsa.soft-mixer")) != NULL)
+			impl->soft_mixer = (strcmp(s, "true") == 0 || atoi(s) == 1);
 		if ((s = acp_dict_lookup(props, "api.alsa.ignore-dB")) != NULL)
 			ignore_dB = (strcmp(s, "true") == 0 || atoi(s) == 1);
 		if ((s = acp_dict_lookup(props, "device.profile-set")) != NULL)
@@ -1210,6 +1396,7 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	pa_alsa_init_description(impl->proplist, NULL);
 
 	add_profiles(impl);
+	prune_singleton_availability_groups(impl->ports);
 
 	card->n_profiles = pa_dynarray_size(&impl->out.profiles);
 	card->profiles = impl->out.profiles.array.data;
@@ -1248,6 +1435,21 @@ void acp_card_add_listener(struct acp_card *card,
 void acp_card_destroy(struct acp_card *card)
 {
 	pa_card *impl = (pa_card *)card;
+	if (impl->profiles)
+		pa_hashmap_free(impl->profiles);
+	if (impl->ports)
+		pa_hashmap_free(impl->ports);
+	pa_dynarray_clear(&impl->out.devices);
+	pa_dynarray_clear(&impl->out.profiles);
+	pa_dynarray_clear(&impl->out.ports);
+	if (impl->ucm.mixers)
+		pa_hashmap_free(impl->ucm.mixers);
+	if (impl->jacks)
+		pa_hashmap_free(impl->jacks);
+	if (impl->profile_set)
+		pa_alsa_profile_set_free(impl->profile_set);
+	pa_alsa_ucm_free(&impl->ucm);
+	pa_proplist_free(impl->proplist);
 	pa_alsa_refcnt_dec();
 	free(impl);
 }
@@ -1417,7 +1619,7 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 
 		data = PA_DEVICE_PORT_DATA(p);
 		d->mixer_path = data->path;
-		mixer_volume_init(d);
+		mixer_volume_init(impl, d);
 
 		sync_mixer(d, p);
 		res = pa_alsa_ucm_set_port(d->ucm_context, p, true);
@@ -1426,7 +1628,7 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 
 		data = PA_DEVICE_PORT_DATA(p);
 		d->mixer_path = data->path;
-		mixer_volume_init(d);
+		mixer_volume_init(impl, d);
 
 		sync_mixer(d, p);
 		res = 0;

@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.15',
+  version : '0.3.19',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -41,9 +41,9 @@ if host_machine.system() == 'linux'
   # glibc ld.so interprets ${LIB} in a library loading path with an
   # appropriate value for the current architecture, typically something
   # like lib, lib64 or lib/x86_64-linux-gnu.
-  # This allows the same pw-pulse script to work for both 32- and 64-bit
+  # This allows the same pw-jack script to work for both 32- and 64-bit
   # applications on biarch/multiarch distributions, by setting something
-  # like LD_LIBRARY_PATH='/usr/${LIB}/pipewire-0.3/pulse'.
+  # like LD_LIBRARY_PATH='/usr/${LIB}/pipewire-0.3/jack'.
   # Note that ${LIB} is a special token expanded by the runtime linker,
   # not an environment variable, and must be passed through literally.
   modules_install_dir_dlopen = join_paths(prefix, '${LIB}', pipewire_name)
@@ -60,49 +60,39 @@ pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 gnome = import('gnome')
 pkgconfig = import('pkgconfig')
 
-have_cpp = add_languages('cpp', required : false)
-
 cc = meson.get_compiler('c')
 
-if cc.get_id() == 'gcc'
-  add_global_arguments('-fvisibility=hidden',
-			'-Wsign-compare',
-			'-Wpointer-arith',
-			'-Wpointer-sign',
-			'-Wformat',
-			'-Wformat-security',
-			'-Werror=suggest-attribute=format',
-			'-Wmissing-braces',
-			'-Wtype-limits',
-			'-Wold-style-declaration',
-			'-Wvariadic-macros',
-		        '-Wno-missing-field-initializers',
-		        '-Wno-unused-parameter',
-			'-Wno-pedantic',
-			'-Wunused-result',
-			'-DFASTPATH',
-#			'-DSPA_DEBUG_MEMCPY',
-			language : 'c')
-  add_global_arguments('-fvisibility=hidden',
-			'-Wsign-compare',
-			'-Wpointer-arith',
-			'-Wformat',
-			'-Wformat-security',
-			'-Werror=suggest-attribute=format',
-			'-Wmissing-braces',
-			'-Wtype-limits',
-			'-Wvariadic-macros',
-		        '-Wno-missing-field-initializers',
-		        '-Wno-unused-parameter',
-			'-Wno-pedantic',
-			'-Wunused-result',
-			language : 'cpp')
-  # warn on implicit fall-through if supported by compiler (gcc >= 7.x)
-  gcc_major_version = cc.version().split('.')[0]
-  if(gcc_major_version.to_int() >= 7)
-    add_global_arguments('-Wimplicit-fallthrough', language : 'c')
-    add_global_arguments('-Wimplicit-fallthrough', language : 'cpp')
-  endif
+common_flags = [
+  '-fvisibility=hidden',
+  '-Werror=suggest-attribute=format',
+  '-Wsign-compare',
+  '-Wpointer-arith',
+  '-Wpointer-sign',
+  '-Wformat',
+  '-Wformat-security',
+  '-Wimplicit-fallthrough',
+  '-Wmissing-braces',
+  '-Wtype-limits',
+  '-Wvariadic-macros',
+  '-Wno-missing-field-initializers',
+  '-Wno-unused-parameter',
+  '-Wno-pedantic',
+  '-Wold-style-declaration',
+  '-Wunused-result',
+]
+
+cc_flags = common_flags + [
+  '-DFASTPATH',
+# '-DSPA_DEBUG_MEMCPY',
+]
+add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
+
+have_cpp = add_languages('cpp', required : false)
+
+if have_cpp
+  cxx = meson.get_compiler('cpp')
+  cxx_flags = common_flags
+  add_project_arguments(cxx.get_supported_arguments(cxx_flags), language: 'cpp')
 endif
 
 sse_args = '-msse'
@@ -267,6 +257,10 @@ if cc.has_type('ptrdiff_t', prefix : '#include <stddef.h>')
   cdata.set('HAVE_PTRDIFF_T', 1)
 endif
 
+if cc.has_function('strndupa', prefix : '#include <string.h>', args : [ '-D_GNU_SOURCE' ])
+  cdata.set('HAVE_STRNDUPA', 1)
+endif
+
 if cc.has_function('mkstemp', prefix : '#include <stdlib.h>')
   cdata.set('HAVE_MKSTEMP', 1)
 endif
@@ -279,9 +273,9 @@ if get_option('systemd')
   systemd = dependency('systemd', required: false)
   systemd_dep = dependency('libsystemd', required: false)
   if systemd.found() and systemd_dep.found()
-    cdata.set('HAVE_SYSTEMD_DAEMON', 1)
+    cdata.set('HAVE_SYSTEMD', 1)
   else
-    warning('Systemd integration was enabled, but systemd is not available')
+    warning('systemd integration was enabled, but systemd is not available')
   endif
 endif
 
@@ -312,6 +306,7 @@ pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
   makedata.set('BUILD_ROOT', meson.build_root())
+  makedata.set('SOURCE_ROOT', meson.source_root())
   makedata.set('VERSION', pipewire_version)
 if version_arr.length() == 4
   makedata.set('TAG', 'HEAD')
@@ -330,9 +325,10 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : false)
+ncurses_dep = dependency('ncurses', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
 
-if get_option('gstreamer') or get_option('pipewire-pulseaudio')
+if get_option('gstreamer')
   glib_dep = dependency('glib-2.0', version : '>=2.32.0')
 endif
 
@@ -367,12 +363,6 @@ subdir('src')
 if get_option('pipewire-jack')
   jack_dep = dependency('jack', version : '>= 1.9.10')
   subdir('pipewire-jack/src')
-endif
-
-if get_option('pipewire-pulseaudio')
-  pulseaudio_dep = dependency('libpulse', version : '>= 11.1')
-  subdir('pipewire-pulseaudio/src')
-  subdir('pipewire-pulseaudio/test')
 endif
 
 if get_option('pipewire-alsa')

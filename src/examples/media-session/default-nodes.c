@@ -34,6 +34,7 @@
 
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
+#include <spa/utils/json.h>
 #include <spa/debug/pod.h>
 
 #include "pipewire/pipewire.h"
@@ -43,8 +44,13 @@
 
 #define NAME		"default-nodes"
 #define SESSION_KEY	"default-nodes"
+#define PREFIX		"default."
 
 #define SAVE_INTERVAL	1
+
+#define DEFAULT_AUDIO_SINK	"default.audio.sink"
+#define DEFAULT_AUDIO_SOURCE	"default.audio.source"
+#define DEFAULT_VIDEO_SOURCE	"default.video.source"
 
 struct impl {
 	struct timespec now;
@@ -119,7 +125,8 @@ static void remove_idle_timeout(struct impl *impl)
 	int res;
 
 	if (impl->idle_timeout) {
-		if ((res = sm_media_session_save_state(impl->session, SESSION_KEY, impl->properties)) < 0)
+		if ((res = sm_media_session_save_state(impl->session,
+						SESSION_KEY, PREFIX, impl->properties)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -155,15 +162,15 @@ static int metadata_property(void *object, uint32_t subject,
 
 	if (subject == PW_ID_CORE) {
 		val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		if (key == NULL || strcmp(key, "default.audio.sink") == 0) {
+		if (key == NULL || strcmp(key, DEFAULT_AUDIO_SINK) == 0) {
 			changed = val != impl->default_audio_sink;
 			impl->default_audio_sink = val;
 		}
-		if (key == NULL || strcmp(key, "default.audio.source") == 0) {
+		if (key == NULL || strcmp(key, DEFAULT_AUDIO_SOURCE) == 0) {
 			changed = val != impl->default_audio_source;
 			impl->default_audio_source = val;
 		}
-		if (key == NULL || strcmp(key, "default.video.source") == 0) {
+		if (key == NULL || strcmp(key, DEFAULT_VIDEO_SOURCE) == 0) {
 			changed = val != impl->default_video_source;
 			impl->default_video_source = val;
 		}
@@ -173,7 +180,7 @@ static int metadata_property(void *object, uint32_t subject,
 		if (key == NULL)
 			pw_properties_clear(impl->properties);
 		else
-			pw_properties_set(impl->properties, key, name);
+			pw_properties_setf(impl->properties, key, "{ \"name\": \"%s\" }", name);
 		add_idle_timeout(impl);
 	}
 	return 0;
@@ -193,12 +200,31 @@ static void session_create(void *data, struct sm_object *object)
 		return;
 
 	spa_dict_for_each(it, &impl->properties->dict) {
-		struct find_data d = { impl, it->value, SPA_ID_INVALID };
+		struct spa_json json[2];
+		int len;
+		const char *value;
+		char name [1024] = "\0";
+		struct find_data d;
+
+		spa_json_init(&json[0], it->value, strlen(it->value));
+		if (spa_json_enter_object(&json[0], &json[1]) <= 0)
+			continue;
+
+		while ((len = spa_json_next(&json[1], &value)) > 0) {
+			if (strncmp(value, "\"name\"", len) == 0) {
+				if (spa_json_get_string(&json[1], name, sizeof(name)) <= 0)
+					continue;
+			} else {
+				if (spa_json_next(&json[1], &value) <= 0)
+					break;
+			}
+		}
+		d = (struct find_data){ impl, name, SPA_ID_INVALID };
 		if (find_name(&d, object)) {
 			char val[16];
 			snprintf(val, sizeof(val)-1, "%u", d.id);
 			pw_log_info("found %s with id:%s restore as %s",
-					it->value, val, it->key);
+					name, val, it->key);
 			pw_metadata_set_property(impl->session->metadata,
 				PW_ID_CORE, it->key, SPA_TYPE_INFO_BASE"Id", val);
 		}
@@ -212,12 +238,21 @@ static void session_remove(void *data, struct sm_object *object)
 	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) != 0)
 		return;
 
-	if (impl->default_audio_sink == object->id)
+	if (impl->default_audio_sink == object->id) {
 		impl->default_audio_sink = SPA_ID_INVALID;
-	if (impl->default_audio_source == object->id)
+		pw_metadata_set_property(impl->session->metadata,
+			PW_ID_CORE, DEFAULT_AUDIO_SINK, SPA_TYPE_INFO_BASE"Id", NULL);
+	}
+	if (impl->default_audio_source == object->id) {
 		impl->default_audio_source = SPA_ID_INVALID;
-	if (impl->default_video_source == object->id)
+		pw_metadata_set_property(impl->session->metadata,
+			PW_ID_CORE, DEFAULT_AUDIO_SOURCE, SPA_TYPE_INFO_BASE"Id", NULL);
+	}
+	if (impl->default_video_source == object->id) {
 		impl->default_video_source = SPA_ID_INVALID;
+		pw_metadata_set_property(impl->session->metadata,
+			PW_ID_CORE, DEFAULT_VIDEO_SOURCE, SPA_TYPE_INFO_BASE"Id", NULL);
+	}
 }
 
 static void session_destroy(void *data)
@@ -260,7 +295,8 @@ int sm_default_nodes_start(struct sm_media_session *session)
 		return -ENOMEM;
 	}
 
-	if ((res = sm_media_session_load_state(impl->session, SESSION_KEY, impl->properties)) < 0)
+	if ((res = sm_media_session_load_state(impl->session,
+					SESSION_KEY, PREFIX, impl->properties)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);

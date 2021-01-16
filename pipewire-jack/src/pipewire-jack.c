@@ -87,6 +87,7 @@ struct globals {
 };
 
 static struct globals globals;
+static bool mlock_warned = false;
 
 #define OBJECT_CHUNK	8
 
@@ -545,7 +546,9 @@ static struct object *find_port(struct client *c, const char *name)
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.ports, link) {
-		if (!strcmp(o->port.name, name))
+		if (strcmp(o->port.name, name) == 0 ||
+		    strcmp(o->port.alias1, name) == 0 ||
+		    strcmp(o->port.alias2, name) == 0)
 			return o;
 	}
 	return NULL;
@@ -1293,6 +1296,7 @@ static int client_node_transport(void *object,
 					  true, on_rtsocket_condition, c);
 
 	c->has_transport = true;
+	c->position = &c->activation->position;
 	pw_thread_loop_signal(c->context.loop, false);
 
 	return 0;
@@ -1801,11 +1805,14 @@ static int client_node_port_use_buffers(void *object,
 				pw_log_warn("unknown buffer data type %d", d->type);
 			}
 			if (c->allow_mlock && mlock(d->data, d->maxsize) < 0) {
-				pw_log_warn(NAME" %p: Failed to mlock memory %p %u: %s", c,
+				if (errno != ENOMEM  || !mlock_warned) {
+					pw_log_warn(NAME" %p: Failed to mlock memory %p %u: %s", c,
 						d->data, d->maxsize,
 						errno == ENOMEM ?
 						"This is not a problem but for best performance, "
 						"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+					mlock_warned |= errno == ENOMEM;
+				}
 			}
 		}
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
@@ -2369,14 +2376,16 @@ jack_client_t * jack_client_open (const char *client_name,
 	struct spa_node_info ni;
 	va_list ap;
 
-        if (getenv("PIPEWIRE_NOJACK") != NULL)
+        if (getenv("PIPEWIRE_NOJACK") != NULL ||
+            getenv("PIPEWIRE_INTERNAL") != NULL ||
+	    strstr(pw_get_library_version(), "0.2") != NULL)
 		goto disabled;
 
 	spa_return_val_if_fail(client_name != NULL, NULL);
 
 	client = calloc(1, sizeof(struct client));
 	if (client == NULL)
-		goto init_failed;
+		goto disabled;
 
 	pw_log_debug(NAME" %p: open '%s' options:%d", client, client_name, options);
 
@@ -2541,7 +2550,7 @@ exit:
 	return NULL;
 disabled:
 	if (status)
-		*status = JackFailure | JackServerFailed;
+		*status = JackFailure | JackInitFailure;
 	return NULL;
 }
 
@@ -3121,8 +3130,12 @@ jack_nframes_t jack_get_sample_rate (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
 	spa_return_val_if_fail(c != NULL, 0);
-	if (c->sample_rate == (uint32_t)-1)
-		return c->rt.position ? c->rt.position->clock.rate.denom : 0;
+	if (c->sample_rate == (uint32_t)-1) {
+		if (c->rt.position)
+			return c->rt.position->clock.rate.denom;
+		if (c->position)
+			return c->position->clock.rate.denom;
+	}
 	return c->sample_rate;
 }
 
@@ -3131,8 +3144,12 @@ jack_nframes_t jack_get_buffer_size (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
 	spa_return_val_if_fail(c != NULL, 0);
-	if (c->buffer_frames == (uint32_t)-1)
-		return c->rt.position ? c->rt.position->clock.duration : 0;
+	if (c->buffer_frames == (uint32_t)-1) {
+		if (c->rt.position)
+			return c->rt.position->clock.duration;
+		if (c->position)
+			return c->position->clock.duration;
+	}
 	return c->buffer_frames;
 }
 
@@ -3513,6 +3530,8 @@ int jack_port_connected (const jack_port_t *port)
 	}
 	pthread_mutex_unlock(&c->context.lock);
 
+	pw_log_debug(NAME" %p: id:%d res:%d", port, o->id, res);
+
 	return res;
 }
 
@@ -3549,6 +3568,7 @@ int jack_port_connected_to (const jack_port_t *port,
 
      exit:
 	pthread_mutex_unlock(&c->context.lock);
+	pw_log_debug(NAME" %p: id:%d name:%s res:%d", port, o->id, port_name, res);
 
 	return res;
 }
@@ -3852,6 +3872,18 @@ int jack_port_monitoring_input (jack_port_t *port)
 	return o->port.monitor_requests > 0;
 }
 
+static void link_proxy_error(void *data, int seq, int res, const char *message)
+{
+	int *link_res = data;
+	*link_res = res;
+}
+
+static const struct pw_proxy_events link_proxy_events = {
+	PW_VERSION_PROXY_EVENTS,
+	.error = link_proxy_error,
+};
+
+
 SPA_EXPORT
 int jack_connect (jack_client_t *client,
                   const char *source_port,
@@ -3862,13 +3894,14 @@ int jack_connect (jack_client_t *client,
 	struct spa_dict props;
 	struct spa_dict_item items[6];
 	struct pw_proxy *proxy;
+	struct spa_hook listener;
 	char val[4][16];
 	const char *str;
-	int res;
+	int res, link_res = 0;
 
-	spa_return_val_if_fail(c != NULL, -EINVAL);
-	spa_return_val_if_fail(source_port != NULL, -EINVAL);
-	spa_return_val_if_fail(destination_port != NULL, -EINVAL);
+	spa_return_val_if_fail(c != NULL, EINVAL);
+	spa_return_val_if_fail(source_port != NULL, EINVAL);
+	spa_return_val_if_fail(destination_port != NULL, EINVAL);
 
 	pw_log_debug(NAME" %p: connect %s %s", client, source_port, destination_port);
 
@@ -3906,14 +3939,27 @@ int jack_connect (jack_client_t *client,
 				    PW_VERSION_LINK,
 				    &props,
 				    0);
+	if (proxy == NULL) {
+		res = -errno;
+		goto exit;
+	}
+
+	spa_zero(listener);
+	pw_proxy_add_listener(proxy, &listener, &link_proxy_events, &link_res);
+
 	res = do_sync(c);
+
+	spa_hook_remove(&listener);
+
+	if (link_res < 0)
+		res = link_res;
 
 	pw_proxy_destroy(proxy);
 
       exit:
 	pw_thread_loop_unlock(c->context.loop);
 
-	return res;
+	return -res;
 }
 
 SPA_EXPORT
@@ -3957,7 +4003,7 @@ int jack_disconnect (jack_client_t *client,
       exit:
 	pw_thread_loop_unlock(c->context.loop);
 
-	return res;
+	return -res;
 }
 
 SPA_EXPORT
@@ -3985,7 +4031,7 @@ int jack_port_disconnect (jack_client_t *client, jack_port_t *port)
 
 	pw_thread_loop_unlock(c->context.loop);
 
-	return res;
+	return -res;
 }
 
 SPA_EXPORT

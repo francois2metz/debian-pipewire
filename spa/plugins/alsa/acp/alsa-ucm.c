@@ -949,10 +949,10 @@ static void probe_volumes(pa_hashmap *hash, bool is_sink, snd_pcm_t *pcm_handle,
 
         PA_HASHMAP_FOREACH_KV(profile, path, data->paths, state2) {
             if (pa_alsa_path_probe(path, NULL, mixer_handle, ignore_dB) < 0) {
-                pa_log_warn("Could not probe path: %s, using s/w volume", data->path->name);
+                pa_log_warn("Could not probe path: %s, using s/w volume", path->name);
                 pa_hashmap_remove(data->paths, profile);
             } else if (!path->has_volume) {
-                pa_log_warn("Path %s is not a volume control", data->path->name);
+                pa_log_warn("Path %s is not a volume control", path->name);
                 pa_hashmap_remove(data->paths, profile);
             } else
                 pa_log_debug("Set up h/w volume using '%s' for %s:%s", path->name, profile, port->name);
@@ -1702,9 +1702,10 @@ static pa_alsa_jack* ucm_get_jack(pa_alsa_ucm_config *ucm, pa_alsa_ucm_device *d
         mixer_device_name = get_jack_mixer_device(device, false);
     if (!mixer_device_name) {
         pa_log("[%s] No mixer device name for JackControl \"%s\"", device_name, jack_control);
-        return NULL;
+        j = NULL;
+        goto finish;
     }
-    j = pa_alsa_jack_new(NULL, mixer_device_name, name);
+    j = pa_alsa_jack_new(NULL, mixer_device_name, name, 0);
     PA_LLIST_PREPEND(pa_alsa_jack, ucm->jacks, j);
 
 finish:
@@ -1938,7 +1939,7 @@ static void ucm_mapping_jack_probe(pa_alsa_mapping *m, pa_hashmap *mixers) {
             continue;
         }
 
-        has_control = pa_alsa_mixer_find_card(mixer_handle, dev->jack->alsa_name, 0) != NULL;
+        has_control = pa_alsa_mixer_find_card(mixer_handle, &dev->jack->alsa_id, 0) != NULL;
         pa_alsa_jack_set_has_control(dev->jack, has_control);
         pa_log_info("UCM jack %s has_control=%d", dev->jack->name, dev->jack->has_control);
     }

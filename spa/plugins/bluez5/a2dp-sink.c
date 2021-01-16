@@ -61,7 +61,6 @@ struct props {
 };
 
 #define FILL_FRAMES 2
-#define MAX_FRAME_COUNT 16
 #define MAX_BUFFERS 32
 
 struct buffer {
@@ -75,7 +74,7 @@ struct buffer {
 
 struct port {
 	struct spa_audio_info current_format;
-	int frame_size;
+	uint32_t frame_size;
 	unsigned int have_format:1;
 
 	uint64_t info_all;
@@ -131,16 +130,17 @@ struct impl {
 	void *codec_data;
 	struct spa_audio_info codec_format;
 
-	int block_size;
-	int num_blocks;
+	uint32_t block_size;
+	uint32_t num_blocks;
 	uint8_t buffer[4096];
-	int buffer_used;
-	int frame_count;
+	uint32_t buffer_used;
+	uint32_t frame_count;
 	uint16_t seqnum;
 	uint32_t timestamp;
 	uint64_t sample_count;
-	uint8_t tmp_buffer[512];
-	int tmp_buffer_used;
+	uint8_t tmp_buffer[4096];
+	uint32_t tmp_buffer_used;
+	uint32_t fd_buffer_size;
 };
 
 #define NAME "a2dp-sink"
@@ -327,6 +327,11 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	return 0;
 }
 
+static void update_num_blocks(struct impl *this)
+{
+	this->num_blocks = this->codec->get_num_blocks(this->codec_data);
+}
+
 static int reset_buffer(struct impl *this)
 {
 	this->frame_count = 0;
@@ -337,24 +342,49 @@ static int reset_buffer(struct impl *this)
 	return 0;
 }
 
+static int get_transport_unused_size(struct impl *this)
+{
+	int res, value;
+	res = ioctl(this->flush_source.fd, TIOCOUTQ, &value);
+	if (res < 0) {
+		spa_log_debug(this->log, NAME " %p: ioctl fail: %m", this);
+		return -errno;
+	}
+	spa_log_debug(this->log, NAME " %p: fd unused buffer size:%d/%d", this, value, this->fd_buffer_size);
+	return value;
+}
+
 static int send_buffer(struct impl *this)
 {
-	int written;
+	int written, unsent;
+	unsent = get_transport_unused_size(this);
+	if (unsent >= 0) {
+		unsent = this->fd_buffer_size - unsent;
+		this->codec->abr_process(this->codec_data, unsent);
+		update_num_blocks(this);
+	}
 
 	spa_log_trace(this->log, NAME " %p: send %d %u %u %u",
 			this, this->frame_count, this->seqnum, this->timestamp, this->buffer_used);
 
-	written = send(this->transport->fd, this->buffer, this->buffer_used, MSG_DONTWAIT | MSG_NOSIGNAL);
+	written = send(this->flush_source.fd, this->buffer, this->buffer_used, MSG_DONTWAIT | MSG_NOSIGNAL);
 	reset_buffer(this);
 
-	spa_log_debug(this->log, NAME " %p: send %d: %m", this, written);
-	if (written < 0)
+	spa_log_debug(this->log, NAME " %p: send %d", this, written);
+	if (written < 0) {
+		spa_log_debug(this->log, NAME " %p: %m", this);
 		return -errno;
+	}
 
 	return written;
 }
 
-static int encode_buffer(struct impl *this, const void *data, int size)
+static bool need_flush(struct impl *this)
+{
+	return (this->frame_count >= this->num_blocks);
+}
+
+static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 {
 	int processed;
 	size_t out_encoded;
@@ -362,11 +392,14 @@ static int encode_buffer(struct impl *this, const void *data, int size)
 	const void *from_data = data;
 	int from_size = size;
 
-	spa_log_trace(this->log, NAME " %p: encode %d used %d, %d %d %d/%d",
+	spa_log_trace(this->log, NAME " %p: encode %d used %d, %d %d %d",
 			this, size, this->buffer_used, port->frame_size, this->block_size,
-			this->frame_count, MAX_FRAME_COUNT);
+			this->frame_count);
 
-	if (this->frame_count > MAX_FRAME_COUNT)
+	if (need_flush(this))
+		return 0;
+
+	if (this->buffer_used >= sizeof(this->buffer))
 		return -ENOSPC;
 
 	if (size < this->block_size - this->tmp_buffer_used) {
@@ -402,14 +435,9 @@ static int encode_buffer(struct impl *this, const void *data, int size)
 	return processed;
 }
 
-static bool need_flush(struct impl *this)
-{
-	return (this->frame_count + 1 >= this->num_blocks);
-}
-
 static int flush_buffer(struct impl *this, bool force)
 {
-	spa_log_trace(this->log, NAME" %p: used:%d num_blocks:%d block_size%d", this,
+	spa_log_trace(this->log, NAME" %p: used:%d num_blocks:%d block_size:%d", this,
 			this->buffer_used, this->num_blocks, this->block_size);
 
 	if (force || need_flush(this))
@@ -418,7 +446,7 @@ static int flush_buffer(struct impl *this, bool force)
 	return 0;
 }
 
-static int add_data(struct impl *this, const void *data, int size)
+static int add_data(struct impl *this, const void *data, uint32_t size)
 {
 	int processed, total = 0;
 
@@ -446,11 +474,12 @@ static void enable_flush(struct impl *this, bool enabled)
 static int flush_data(struct impl *this, uint64_t now_time)
 {
 	int written;
-	uint32_t total_frames;
+	uint32_t total_frames, iter_buffer_used;
 	struct port *port = &this->port;
 
 	total_frames = 0;
 again:
+	iter_buffer_used = this->buffer_used;
 	while (!spa_list_is_empty(&port->ready)) {
 		uint8_t *src;
 		uint32_t n_bytes, n_frames;
@@ -508,11 +537,18 @@ again:
 		spa_log_trace(this->log, NAME " %p: written %u frames", this, total_frames);
 	}
 
+	iter_buffer_used = this->buffer_used - iter_buffer_used;
+	if (written > 0 && iter_buffer_used == 0) {
+		enable_flush(this, false);
+		return 0;
+	}
+
 	written = flush_buffer(this, true);
 	if (written == -EAGAIN) {
 		spa_log_trace(this->log, NAME" %p: delay flush", this);
 		if (now_time - this->last_error > SPA_NSEC_PER_SEC / 2) {
 			this->codec->reduce_bitpool(this->codec_data);
+			update_num_blocks(this);
 			this->last_error = now_time;
 		}
 		enable_flush(this, true);
@@ -525,6 +561,7 @@ again:
 	else if (written > 0) {
 		if (now_time - this->last_error > SPA_NSEC_PER_SEC) {
 			this->codec->increase_bitpool(this->codec_data);
+			update_num_blocks(this);
 			this->last_error = now_time;
 		}
 		if (!spa_list_is_empty(&port->ready))
@@ -559,6 +596,9 @@ static void a2dp_on_timeout(struct spa_source *source)
 	struct spa_io_buffers *io = port->io;
 	uint64_t prev_time, now_time;
 
+	if (this->transport == NULL)
+		return;
+
 	if (this->started && spa_system_timerfd_read(this->data_system, this->timerfd, &exp) < 0)
 		spa_log_warn(this->log, "error reading timerfd: %s", strerror(errno));
 
@@ -579,9 +619,11 @@ static void a2dp_on_timeout(struct spa_source *source)
 		this->clock->nsec = now_time;
 		this->clock->position += duration;
 		this->clock->duration = duration;
-		this->clock->delay = 0;
 		this->clock->rate_diff = 1.0f;
 		this->clock->next_nsec = this->next_time;
+
+		// The bluetooth AVDTP delay value is measured in units of 100us
+		this->clock->delay = (100 * this->transport->delay * (int64_t) this->clock->rate.denom) / SPA_USEC_PER_SEC;
 	}
 
 	spa_log_debug(this->log, NAME" %p: timeout %"PRIu64" %"PRIu64"", this,
@@ -596,8 +638,10 @@ static void a2dp_on_timeout(struct spa_source *source)
 
 static int do_start(struct impl *this)
 {
-	int res, val;
+	int i, res, val, size;
+	struct port *port;
 	socklen_t len;
+	uint8_t *conf;
 
 	if (this->started)
 		return 0;
@@ -611,16 +655,38 @@ static int do_start(struct impl *this)
 	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0)
 		return res;
 
+	port = &this->port;
+
+	conf = this->transport->configuration;
+	size = this->transport->configuration_len;
+
+	for (i = 0; i < size; i++)
+		spa_log_debug(this->log, "  %d: %02x", i, conf[i]);
+
+	this->codec_data = this->codec->init(this->codec, 0,
+			this->transport->configuration,
+			this->transport->configuration_len,
+			&port->current_format,
+			this->transport->write_mtu);
+	if (this->codec_data == NULL)
+		return -EIO;
+
+        spa_log_info(this->log, NAME " %p: using A2DP codec %s", this, this->codec->description);
+
 	this->seqnum = 0;
 
 	this->block_size = this->codec->get_block_size(this->codec_data);
-	this->num_blocks = this->codec->get_num_blocks(this->codec_data,
-			this->transport->write_mtu);
+	this->num_blocks = this->codec->get_num_blocks(this->codec_data);
+	if (this->block_size > sizeof(this->tmp_buffer)) {
+		spa_log_error(this->log, "block-size %d > %zu",
+				this->block_size, sizeof(this->tmp_buffer));
+		return -EIO;
+	}
 
         spa_log_debug(this->log, NAME " %p: block_size %d num_blocks:%d", this,
 			this->block_size, this->num_blocks);
 
-	val = FILL_FRAMES * this->transport->write_mtu;
+	val = SPA_MAX(this->codec->send_fill_frames, FILL_FRAMES) * this->transport->write_mtu;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, NAME " %p: SO_SNDBUF %m", this);
 
@@ -631,8 +697,9 @@ static int do_start(struct impl *this)
 	else {
 		spa_log_debug(this->log, NAME " %p: SO_SNDBUF: %d", this, val);
 	}
+	this->fd_buffer_size = val;
 
-	val = FILL_FRAMES * this->transport->read_mtu;
+	val = SPA_MAX(this->codec->recv_fill_frames, FILL_FRAMES) * this->transport->read_mtu;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, NAME " %p: SO_RCVBUF %m", this);
 
@@ -700,6 +767,10 @@ static int do_stop(struct impl *this)
 
 	if (this->transport)
 		res = spa_bt_transport_release(this->transport);
+
+	if (this->codec_data)
+		this->codec->deinit(this->codec_data);
+	this->codec_data = NULL;
 
 	return res;
 }
@@ -836,6 +907,7 @@ impl_node_port_enum_params(void *object, int seq,
 	uint8_t buffer[1024];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
+	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
@@ -852,24 +924,16 @@ impl_node_port_enum_params(void *object, int seq,
 
 	switch (id) {
 	case SPA_PARAM_EnumFormat:
-		if (result.index > 0)
-			return 0;
-		if (this->codec_data == NULL)
+		if (this->codec == NULL)
+			return -EIO;
+		if (this->transport == NULL)
 			return -EIO;
 
-		switch (this->transport->codec) {
-		case A2DP_CODEC_SBC:
-			param = spa_format_audio_raw_build(&b, id, &this->codec_format.info.raw);
-			break;
-		case A2DP_CODEC_MPEG24:
-			param = spa_pod_builder_add_object(&b,
-				SPA_TYPE_OBJECT_Format, id,
-				SPA_FORMAT_mediaType,     SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-				SPA_FORMAT_mediaSubtype,  SPA_POD_Id(SPA_MEDIA_SUBTYPE_aac));
-			break;
-		default:
-			return -EIO;
-		}
+		if ((res = this->codec->enum_config(this->codec,
+					this->transport->configuration,
+					this->transport->configuration_len,
+					id, result.index, &b, &param)) != 1)
+			return res;
 		break;
 
 	case SPA_PARAM_Format:
@@ -906,6 +970,19 @@ impl_node_port_enum_params(void *object, int seq,
 				SPA_TYPE_OBJECT_ParamMeta, id,
 				SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
 				SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
+			break;
+		default:
+			return 0;
+		}
+		break;
+
+	case SPA_PARAM_IO:
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamIO, id,
+				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
+				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
 			break;
 		default:
 			return 0;
@@ -960,7 +1037,23 @@ static int port_set_format(struct impl *this, struct port *port,
 		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
 			return -EINVAL;
 
-		port->frame_size = info.info.raw.channels * 2;
+		port->frame_size = info.info.raw.channels;
+		switch (info.info.raw.format) {
+		case SPA_AUDIO_FORMAT_S16:
+			port->frame_size *= 2;
+			break;
+		case SPA_AUDIO_FORMAT_S24:
+			port->frame_size *= 3;
+			break;
+		case SPA_AUDIO_FORMAT_S24_32:
+		case SPA_AUDIO_FORMAT_S32:
+		case SPA_AUDIO_FORMAT_F32:
+			port->frame_size *= 4;
+			break;
+		default:
+			return -EINVAL;
+		}
+
 		port->current_format = info;
 		port->have_format = true;
 	}
@@ -1131,11 +1224,23 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static int do_transport_destroy(struct spa_loop *loop,
+				bool async,
+				uint32_t seq,
+				const void *data,
+				size_t size,
+				void *user_data)
+{
+	struct impl *this = user_data;
+	this->transport = NULL;
+	return 0;
+}
+
 static void transport_destroy(void *data)
 {
 	struct impl *this = data;
 	spa_log_debug(this->log, "transport %p destroy", this->transport);
-	this->transport = NULL;
+	spa_loop_invoke(this->data_loop, do_transport_destroy, 0, NULL, 0, true, this);
 }
 
 static const struct spa_bt_transport_events transport_events = {
@@ -1263,10 +1368,6 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->timerfd = spa_system_timerfd_create(this->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
-
-	this->codec_data = this->codec->init(0, this->transport->configuration,
-			this->transport->configuration_len,
-			&this->codec_format);
 
 	return 0;
 }
