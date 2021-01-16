@@ -8,7 +8,7 @@ spa_alsa_sources = ['alsa.c',
                 'alsa-pcm-sink.c',
                 'alsa-pcm-source.c',
                 'alsa-pcm.c',
-                'alsa-seq-source.c',
+                'alsa-seq-bridge.c',
                 'alsa-seq.c']
 
 spa_alsa = shared_library(
@@ -33,6 +33,13 @@ executable('spa-acp-tool',
   dependencies : [ alsa_dep, mathlib ],
   link_with : [ acp_lib ],
   install : true,
+)
+
+
+executable('test-timer',
+  [ 'test-timer.c' ],
+  dependencies : [ alsa_dep, mathlib ],
+  install : false,
 )
 
 if libudev_dep.found()

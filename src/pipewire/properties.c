@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <spa/utils/json.h>
 
 #include "pipewire/array.h"
 #include "pipewire/utils.h"
@@ -144,10 +145,49 @@ struct pw_properties *pw_properties_new_dict(const struct spa_dict *dict)
 	return &impl->this;
 }
 
+SPA_EXPORT
+int pw_properties_update_string(struct pw_properties *props, const char *str, size_t size)
+{
+	struct properties *impl = SPA_CONTAINER_OF(props, struct properties, this);
+	struct spa_json it[2];
+	char key[1024], *val;
+	int count = 0;
+
+	spa_json_init(&it[0], str, size);
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		spa_json_init(&it[1], str, size);
+
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1)) {
+		int len;
+		const char *value;
+
+		if ((len = spa_json_next(&it[1], &value)) <= 0)
+			break;
+
+		if (key[0] == '#')
+			continue;
+		if (spa_json_is_null(value, len))
+			val = NULL;
+		else {
+			if (spa_json_is_container(value, len))
+				len = spa_json_container_len(&it[1], value, len);
+
+			if ((val = strndup(value, len)) == NULL)
+				return -errno;
+
+			if (spa_json_is_string(value, len))
+				spa_json_parse_string(value, len, val);
+		}
+		count += pw_properties_set(&impl->this, key, val);
+		free(val);
+	}
+	return count;
+}
+
 /** Make a new properties object from the given str
  *
  * \a str should be a whitespace separated list of key=value
- * strings.
+ * strings or a json object.
  *
  * \param args a property description
  * \return a new properties object
@@ -156,39 +196,20 @@ struct pw_properties *pw_properties_new_dict(const struct spa_dict *dict)
  */
 SPA_EXPORT
 struct pw_properties *
-pw_properties_new_string(const char *str)
+pw_properties_new_string(const char *object)
 {
-
 	struct properties *impl;
-        const char *state = NULL, *s = NULL;
-	size_t len;
 	int res;
 
 	impl = properties_new(16);
 	if (impl == NULL)
 		return NULL;
 
-	s = pw_split_walk(str, " \t\n\r", &len, &state);
-	while (s) {
-		char *val, *eq;
+	if ((res = pw_properties_update_string(&impl->this, object, strlen(object))) < 0)
+		goto error;
 
-		if ((val = strndup(s, len)) == NULL) {
-			res = -errno;
-			goto no_mem;
-		}
-
-		eq = strchr(val, '=');
-		if (eq && eq != val) {
-			*eq = '\0';
-			add_func(&impl->this, val, strdup(eq+1));
-		} else {
-			free(val);
-		}
-		s = pw_split_walk(str, " \t\n\r", &len, &state);
-	}
 	return &impl->this;
-
-no_mem:
+error:
 	pw_properties_free(&impl->this);
 	errno = -res;
 	return NULL;
@@ -346,7 +367,7 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 	int index;
 
 	if (key == NULL || key[0] == 0)
-		return 0;
+		goto exit_noupdate;
 
 	index = find_index(properties, key);
 
@@ -358,11 +379,8 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		struct spa_dict_item *item =
 		    pw_array_get_unchecked(&impl->items, index, struct spa_dict_item);
 
-		if (value && strcmp(item->value, value) == 0) {
-			if (!copy)
-				free(value);
-			return 0;
-		}
+		if (value && strcmp(item->value, value) == 0)
+			goto exit_noupdate;
 
 		if (value == NULL) {
 			struct spa_dict_item *last = pw_array_get_unchecked(&impl->items,
@@ -379,6 +397,10 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		}
 	}
 	return 1;
+exit_noupdate:
+	if (!copy)
+		free(value);
+	return 0;
 }
 
 /** Set a property value

@@ -84,6 +84,73 @@ static inline bool ratelimit_test(struct ratelimit *r, uint64_t now)
 
 #define MAX_PARAMS	32
 
+struct pw_param {
+	uint32_t id;
+	struct spa_list link;
+	struct spa_pod *param;
+};
+
+static inline struct pw_param *pw_param_add(struct spa_list *params,
+		uint32_t id, const struct spa_pod *param)
+{
+	struct pw_param *p;
+
+	if (param == NULL || !spa_pod_is_object(param)) {
+		errno = EINVAL;
+		return NULL;
+	}
+	if (id == SPA_ID_INVALID)
+		id = SPA_POD_OBJECT_ID(param);
+
+	if ((p = malloc(sizeof(*p) + SPA_POD_SIZE(param))) == NULL)
+		return NULL;
+
+	p->id = id;
+	p->param = SPA_MEMBER(p, sizeof(*p), struct spa_pod);
+	memcpy(p->param, param, SPA_POD_SIZE(param));
+	spa_list_append(params, &p->link);
+	return p;
+}
+
+static inline uint32_t pw_param_clear(struct spa_list *param_list, uint32_t id)
+{
+	struct pw_param *p, *t;
+	uint32_t count = 0;
+
+	spa_list_for_each_safe(p, t, param_list, link) {
+		if (id == SPA_ID_INVALID || p->id == id) {
+			spa_list_remove(&p->link);
+			free(p);
+			count++;
+		}
+	}
+	return count;
+}
+
+static inline void pw_param_update(struct spa_list *param_list, struct spa_list *pending_list)
+{
+	struct pw_param *p;
+
+	spa_list_for_each(p, pending_list, link)
+		pw_param_clear(param_list, p->id);
+
+	spa_list_consume(p, pending_list, link) {
+		spa_list_remove(&p->link);
+		spa_list_append(param_list, &p->link);
+	}
+}
+
+static inline struct spa_param_info *pw_param_info_find(struct spa_param_info info[],
+		uint32_t n_info, uint32_t id)
+{
+	uint32_t i;
+	for (i = 0; i < n_info; i++) {
+		if (info[i].id == id)
+			return &info[i];
+	}
+	return NULL;
+}
+
 #define pw_protocol_emit_destroy(p) spa_hook_list_call(&p->listener_list, struct pw_protocol_events, destroy, 0)
 
 struct pw_protocol {
@@ -219,6 +286,9 @@ struct pw_global {
 	void *object;			/**< object associated with the interface */
 
 	struct spa_list resource_list;	/**< The list of resources of this global */
+
+	unsigned int registered:1;
+	unsigned int destroyed:1;
 };
 
 #define pw_core_resource(r,m,v,...)	pw_resource_call(r, struct pw_core_events, m, v, ##__VA_ARGS__)
@@ -259,6 +329,7 @@ pw_core_resource_errorf(struct pw_resource *resource, uint32_t id, int seq,
 #define pw_context_driver_emit_incomplete(c,n)	pw_context_driver_emit(c, incomplete, 0, n)
 #define pw_context_driver_emit_timeout(c,n)	pw_context_driver_emit(c, timeout, 0, n)
 #define pw_context_driver_emit_drained(c,n)	pw_context_driver_emit(c, drained, 0, n)
+#define pw_context_driver_emit_complete(c,n)	pw_context_driver_emit(c, complete, 0, n)
 
 struct pw_context_driver_events {
 #define PW_VERSION_CONTEXT_DRIVER_EVENTS	0
@@ -274,6 +345,8 @@ struct pw_context_driver_events {
 	void (*timeout) (void *data, struct pw_impl_node *node);
 	/** a node drained */
 	void (*drained) (void *data, struct pw_impl_node *node);
+	/** The driver completed the graph */
+	void (*complete) (void *data, struct pw_impl_node *node);
 };
 
 #define pw_registry_resource(r,m,v,...) pw_resource_call(r, struct pw_registry_events,m,v,##__VA_ARGS__)
@@ -572,6 +645,7 @@ struct pw_impl_node {
 
 	struct pw_loop *data_loop;		/**< the data loop for this node */
 
+	struct spa_fraction latency;		/**< requested latency */
 	uint32_t quantum_size;			/**< desired quantum */
 	struct spa_source source;		/**< source to remotely trigger this node */
 	struct pw_memblock *activation;

@@ -31,6 +31,7 @@
 
 #include <spa/support/system.h>
 #include <spa/pod/parser.h>
+#include <spa/pod/filter.h>
 #include <spa/node/utils.h>
 #include <spa/debug/types.h>
 
@@ -52,7 +53,11 @@ struct impl {
 
 	int last_error;
 
+	struct spa_list param_list;
+	struct spa_list pending_list;
+
 	unsigned int pause_on_idle:1;
+	unsigned int cache_params:1;
 };
 
 #define pw_node_resource(r,m,v,...)	pw_resource_call(r,struct pw_node_events,m,v,__VA_ARGS__)
@@ -509,6 +514,8 @@ static void resource_destroy(void *data)
 {
 	struct resource_data *d = data;
 	remove_busy_resource(d);
+	spa_hook_remove(&d->resource_listener);
+	spa_hook_remove(&d->object_listener);
 }
 
 static void resource_pong(void *data, int seq)
@@ -812,6 +819,11 @@ static void check_properties(struct pw_impl_node *node)
 	else
 		impl->pause_on_idle = true;
 
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_CACHE_PARAMS)))
+		impl->cache_params = pw_properties_parse_bool(str);
+	else
+		impl->cache_params = true;
+
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_DRIVER)))
 		driver = pw_properties_parse_bool(str);
 	else
@@ -839,6 +851,7 @@ static void check_properties(struct pw_impl_node *node)
                 if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
 			uint32_t quantum_size;
 
+			node->latency = SPA_FRACTION(num, denom);
 			quantum_size = flp2((num * context->defaults.clock_rate / denom));
 
 			if (quantum_size != node->quantum_size) {
@@ -877,6 +890,8 @@ static const char *str_status(uint32_t status)
 static void dump_states(struct pw_impl_node *driver)
 {
 	struct pw_node_target *t;
+	struct pw_node_activation *na = driver->rt.activation;
+	struct spa_io_clock *cl = &na->position.clock;
 
 	spa_list_for_each(t, &driver->rt.target_list, link) {
 		struct pw_node_activation *a = t->activation;
@@ -885,8 +900,10 @@ static void dump_states(struct pw_impl_node *driver)
 			continue;
 		if (a->status == PW_NODE_ACTIVATION_TRIGGERED ||
 		    a->status == PW_NODE_ACTIVATION_AWAKE) {
-			pw_log_warn("(%s-%u) client too slow! status:%s",
-				t->node->name, t->node->info.id, str_status(a->status));
+			pw_log_warn("(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s",
+				t->node->name, t->node->info.id,
+				(uint32_t)(cl->rate.num * cl->duration), cl->rate.denom,
+				cl->position, str_status(a->status));
 		}
 		pw_log_debug("(%s-%u) state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 				" waiting:%"PRIu64" process:%"PRIu64" status:%s sync:%d",
@@ -991,7 +1008,7 @@ static inline int process_node(void *data)
 				a->signal_time - a->prev_signal_time,
 				a->cpu_load[0], a->cpu_load[1], a->cpu_load[2]);
 
-		pw_context_driver_emit_start(this->context, this);
+		pw_context_driver_emit_complete(this->context, this);
 
 	} else if (status == SPA_STATUS_OK) {
 		pw_log_trace_fp(NAME" %p: async continue", this);
@@ -1068,6 +1085,9 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 		res = -errno;
 		goto error_exit;
 	}
+
+	spa_list_init(&impl->param_list);
+	spa_list_init(&impl->pending_list);
 
 	this = &impl->this;
 	this->context = context;
@@ -1227,6 +1247,7 @@ int pw_impl_node_update_properties(struct pw_impl_node *node, const struct spa_d
 static void node_info(void *data, const struct spa_node_info *info)
 {
 	struct pw_impl_node *node = data;
+	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
 	bool flags_changed = false;
 
@@ -1254,16 +1275,23 @@ static void node_info(void *data, const struct spa_node_info *info)
 		node->info.n_params = SPA_MIN(info->n_params, SPA_N_ELEMENTS(node->params));
 
 		for (i = 0; i < node->info.n_params; i++) {
+			uint32_t id = info->params[i].id;
+
 			pw_log_debug(NAME" %p: param %d id:%d (%s) %08x:%08x", node, i,
-					info->params[i].id,
-					spa_debug_type_find_name(spa_type_param, info->params[i].id),
+					id, spa_debug_type_find_name(spa_type_param, id),
 					node->info.params[i].flags, info->params[i].flags);
 
-			if (node->info.params[i].flags != info->params[i].flags &&
-			    info->params[i].flags & SPA_PARAM_INFO_READ)
-				changed_ids[n_changed_ids++] = info->params[i].id;
+			node->info.params[i].id = info->params[i].id;
+			if (node->info.params[i].flags == info->params[i].flags)
+				continue;
 
+			pw_log_debug(NAME" %p: update param %d", node, id);
+			pw_param_clear(&impl->pending_list, id);
 			node->info.params[i] = info->params[i];
+			node->info.params[i].user = 0;
+
+			if (info->params[i].flags & SPA_PARAM_INFO_READ)
+				changed_ids[n_changed_ids++] = id;
 		}
 	}
 	emit_info_changed(node, flags_changed);
@@ -1514,6 +1542,8 @@ static int node_ready(void *data, int status)
 			do_reposition(node, reposition_node);
 
 		update_position(node, all_ready);
+
+		pw_context_driver_emit_start(node->context, node);
 	}
 	if (SPA_UNLIKELY(node->driver && !node->driving))
 		return 0;
@@ -1678,9 +1708,14 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 	pw_log_debug(NAME" %p: free", node);
 	pw_impl_node_emit_free(node);
 
+	spa_hook_list_clean(&node->listener_list);
+
 	pw_memblock_unref(node->activation);
 
 	pw_work_queue_destroy(impl->work);
+
+	pw_param_clear(&impl->param_list, SPA_ID_INVALID);
+	pw_param_clear(&impl->pending_list, SPA_ID_INVALID);
 
 	pw_map_clear(&node->input_port_map);
 	pw_map_clear(&node->output_port_map);
@@ -1715,22 +1750,28 @@ int pw_impl_node_for_each_port(struct pw_impl_node *node,
 }
 
 struct result_node_params_data {
+	struct impl *impl;
 	void *data;
 	int (*callback) (void *data, int seq,
 			uint32_t id, uint32_t index, uint32_t next,
 			struct spa_pod *param);
 	int seq;
+	unsigned int cache:1;
 };
 
 static void result_node_params(void *data, int seq, int res, uint32_t type, const void *result)
 {
 	struct result_node_params_data *d = data;
+	struct impl *impl = d->impl;
 	switch (type) {
 	case SPA_RESULT_TYPE_NODE_PARAMS:
 	{
 		const struct spa_result_node_params *r = result;
-		if (d->seq == seq)
+		if (d->seq == seq) {
 			d->callback(d->data, seq, r->id, r->index, r->next, r->param);
+			if (d->cache)
+				pw_param_add(&impl->pending_list, r->id, r->param);
+		}
 		break;
 	}
 	default:
@@ -1749,27 +1790,70 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 			   void *data)
 {
 	int res;
-	struct result_node_params_data user_data = { data, callback, seq };
+	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
+	struct result_node_params_data user_data = { impl, data, callback, seq, false };
 	struct spa_hook listener;
+	struct spa_param_info *pi;
 	static const struct spa_node_events node_events = {
 		SPA_VERSION_NODE_EVENTS,
 		.result = result_node_params,
 	};
 
+	pi = pw_param_info_find(node->info.params, node->info.n_params, param_id);
+	if (pi == NULL)
+		return -ENOENT;
+
 	if (max == 0)
 		max = UINT32_MAX;
 
-	pw_log_debug(NAME" %p: params id:%d (%s) index:%u max:%u", node, param_id,
+	pw_log_debug(NAME" %p: params id:%d (%s) index:%u max:%u cached:%d", node, param_id,
 			spa_debug_type_find_name(spa_type_param, param_id),
-			index, max);
+			index, max, pi->user);
 
-	spa_zero(listener);
-	spa_node_add_listener(node->node, &listener, &node_events, &user_data);
-	res = spa_node_enum_params(node->node, seq,
-					param_id, index, max,
-					filter);
-	spa_hook_remove(&listener);
+	if (pi->user == 1) {
+		struct pw_param *p;
+		uint8_t buffer[1024];
+		struct spa_pod_builder b = { 0 };
+	        struct spa_result_node_params result;
+		uint32_t count = 0;
 
+		result.id = param_id;
+		result.next = 0;
+
+		spa_list_for_each(p, &impl->param_list, link) {
+			result.index = result.next++;
+			if (p->id != param_id)
+				continue;
+
+			if (result.index < index)
+				continue;
+
+			spa_pod_builder_init(&b, buffer, sizeof(buffer));
+			if (spa_pod_filter(&b, &result.param, p->param, filter) != 0)
+				continue;
+
+			pw_log_debug(NAME " %p: %d param %u", node, seq, result.index);
+			result_node_params(&user_data, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+			if (++count == max)
+				break;
+		}
+		res = 0;
+	} else {
+		user_data.cache = impl->cache_params && filter == NULL;
+
+		spa_zero(listener);
+		spa_node_add_listener(node->node, &listener, &node_events, &user_data);
+		res = spa_node_enum_params(node->node, seq,
+						param_id, index, max,
+						filter);
+		spa_hook_remove(&listener);
+
+		if (user_data.cache) {
+			pw_param_update(&impl->param_list, &impl->pending_list);
+			pi->user = 1;
+		}
+	}
 	return res;
 }
 

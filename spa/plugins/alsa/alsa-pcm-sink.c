@@ -239,6 +239,16 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	spa_return_val_if_fail(command != NULL, -EINVAL);
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
+	case SPA_NODE_COMMAND_ParamBegin:
+		if ((res = spa_alsa_open(this)) < 0)
+			return res;
+		break;
+	case SPA_NODE_COMMAND_ParamEnd:
+		if (this->have_format)
+			return 0;
+		if ((res = spa_alsa_close(this)) < 0)
+			return res;
+		break;
 	case SPA_NODE_COMMAND_Start:
 		if (!this->have_format)
 			return -EIO;
@@ -681,6 +691,10 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 static int impl_clear(struct spa_handle *handle)
 {
+	struct state *this;
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+	this = (struct state *) handle;
+	spa_alsa_close(this);
 	return 0;
 }
 
@@ -758,6 +772,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	spa_list_init(&this->ready);
 
+	snd_config_update_free_global();
+
 	for (i = 0; info && i < info->n_items; i++) {
 		if (!strcmp(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {
 			snprintf(this->props.device, 63, "%s", info->items[i].value);
@@ -765,9 +781,22 @@ impl_init(const struct spa_handle_factory *factory,
 			this->default_channels = atoi(info->items[i].value);
 		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_RATE)) {
 			this->default_rate = atoi(info->items[i].value);
+		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_FORMAT)) {
+			this->default_format = spa_alsa_format_from_name(info->items[i].value, 128);
+		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_POSITION)) {
+			size_t len;
+			const char *p = info->items[i].value;
+			while (*p && this->default_pos.channels < SPA_AUDIO_MAX_CHANNELS) {
+				if ((len = strcspn(p, ",")) == 0)
+					break;
+				this->default_pos.pos[this->default_pos.channels++] =
+					spa_alsa_channel_from_name(p, len);
+				p += len + strspn(p+len, ",");
+			}
+		} else if (!strcmp(info->items[i].key, "api.alsa.period-size")) {
+			this->default_period_size = atoi(info->items[i].value);
 		}
 	}
-
 	return 0;
 }
 

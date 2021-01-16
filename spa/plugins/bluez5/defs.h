@@ -141,6 +141,11 @@ extern "C" {
 #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
 #define A2DP_SOURCE_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSource"
 
+/* HFP uses SBC encoding with precisely defined parameters. Hence, the size
+ * of the input (number of PCM samples) and output is known up front. */
+#define MSBC_DECODED_SIZE       240
+#define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
+
 enum spa_bt_profile {
         SPA_BT_PROFILE_NULL =		0,
         SPA_BT_PROFILE_A2DP_SINK =	(1 << 0),
@@ -241,6 +246,14 @@ struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monit
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 
+struct spa_bt_sco_io;
+
+struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_loop *data_loop, int fd, uint16_t write_mtu, uint16_t read_mtu);
+void spa_bt_sco_io_destroy(struct spa_bt_sco_io *io);
+void spa_bt_sco_io_set_source_cb(struct spa_bt_sco_io *io, int (*source_cb)(void *userdata, uint8_t *data, int size), void *userdata);
+void spa_bt_sco_io_set_sink_cb(struct spa_bt_sco_io *io, int (*sink_cb)(void *userdata), void *userdata);
+int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *data, int size);
+
 enum spa_bt_transport_state {
         SPA_BT_TRANSPORT_STATE_IDLE,
         SPA_BT_TRANSPORT_STATE_PENDING,
@@ -279,11 +292,15 @@ struct spa_bt_transport {
 	void *configuration;
 	int configuration_len;
 
-	bool acquired;
+	int acquire_refcount;
 	int fd;
 	uint16_t read_mtu;
 	uint16_t write_mtu;
+	uint16_t delay;
 	void *user_data;
+	struct spa_bt_sco_io *sco_io;
+
+	struct spa_source release_timer;
 
 	struct spa_hook_list listener_list;
 	struct spa_callbacks impl;
@@ -295,6 +312,10 @@ struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, c
 struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monitor,
                                                     bool (*callback) (struct spa_bt_transport *t, const void *data),
                                                     const void *data);
+
+int spa_bt_transport_acquire(struct spa_bt_transport *t, bool optional);
+int spa_bt_transport_release(struct spa_bt_transport *t);
+void spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop);
 
 #define spa_bt_transport_emit(t,m,v,...)		spa_hook_list_call(&(t)->listener_list, \
 								struct spa_bt_transport_events,	\
@@ -317,8 +338,6 @@ struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monit
 	res;						\
 })
 
-#define spa_bt_transport_acquire(t,o)	spa_bt_transport_impl(t, acquire, 0, o)
-#define spa_bt_transport_release(t)	spa_bt_transport_impl(t, release, 0)
 #define spa_bt_transport_destroy(t)	spa_bt_transport_impl(t, destroy, 0)
 
 static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(const char *value)
@@ -355,6 +374,7 @@ static inline void backend_hsp_native_register_profiles(struct spa_bt_backend *b
 #ifdef HAVE_BLUEZ_5_BACKEND_OFONO
 struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
 void backend_ofono_free(struct spa_bt_backend *backend);
@@ -362,6 +382,7 @@ void backend_ofono_add_filters(struct spa_bt_backend *backend);
 #else
 static inline struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support) {
 	return NULL;
@@ -373,6 +394,7 @@ static inline void backend_ofono_add_filters(struct spa_bt_backend *backend) {}
 #ifdef HAVE_BLUEZ_5_BACKEND_HSPHFPD
 struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
 void backend_hsphfpd_free(struct spa_bt_backend *backend);
@@ -380,6 +402,7 @@ void backend_hsphfpd_add_filters(struct spa_bt_backend *backend);
 #else
 static inline struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support) {
 	return NULL;

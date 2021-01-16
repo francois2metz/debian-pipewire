@@ -44,6 +44,8 @@
 
 #define NAME "audioconvert"
 
+#define MAX_PORTS	SPA_AUDIO_MAX_CHANNELS
+
 struct buffer {
 	struct spa_list link;
 #define BUFFER_FLAG_OUT		(1 << 0)
@@ -386,6 +388,14 @@ static int negotiate_link_buffers(struct impl *this, struct link *link)
 		return res;
 
 	return 0;
+}
+
+static void flush_convert(struct impl *this)
+{
+	int i;
+	spa_log_debug(this->log, NAME " %p: %d", this, this->n_links);
+	for (i = 0; i < this->n_links; i++)
+		this->links[i].io.status = SPA_STATUS_OK;
 }
 
 static void clean_convert(struct impl *this)
@@ -809,6 +819,9 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	case SPA_NODE_COMMAND_Suspend:
 		clean_convert(this);
 		SPA_FALLTHROUGH
+	case SPA_NODE_COMMAND_Flush:
+		flush_convert(this);
+		SPA_FALLTHROUGH
 	case SPA_NODE_COMMAND_Pause:
 		this->started = false;
 		break;
@@ -1228,8 +1241,8 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS |
 			SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info = SPA_NODE_INFO_INIT();
-	this->info.max_input_ports = 128;
-	this->info.max_output_ports = 128;
+	this->info.max_input_ports = MAX_PORTS;
+	this->info.max_output_ports = MAX_PORTS;
 	this->info.flags = SPA_NODE_FLAG_RT |
 		SPA_NODE_FLAG_IN_PORT_CONFIG |
 		SPA_NODE_FLAG_OUT_PORT_CONFIG |

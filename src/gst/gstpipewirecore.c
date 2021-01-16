@@ -41,7 +41,7 @@ on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
   GstPipeWireCore *core = data;
 
-  pw_log_error("error id:%u seq:%d res:%d (%s): %s",
+  pw_log_warn("error id:%u seq:%d res:%d (%s): %s",
           id, seq, res, spa_strerror(res), message);
 
   if (id == PW_ID_CORE) {
@@ -102,12 +102,18 @@ static GstPipeWireCore *make_core (int fd)
 mainloop_failed:
   {
     GST_ERROR ("error starting mainloop");
+    pw_context_destroy (core->context);
+    pw_thread_loop_destroy (core->loop);
+    g_free (core);
     return NULL;
   }
 connection_failed:
   {
     GST_ERROR ("error connect: %m");
     pw_thread_loop_unlock (core->loop);
+    pw_context_destroy (core->context);
+    pw_thread_loop_destroy (core->loop);
+    g_free (core);
     return NULL;
   }
 }

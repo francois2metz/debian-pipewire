@@ -17,6 +17,13 @@ executable('pw-dot',
 	dependencies : [pipewire_dep],
 )
 
+executable('pw-dump',
+	'pw-dump.c',
+	c_args : [ '-D_GNU_SOURCE' ],
+	install: true,
+	dependencies : [pipewire_dep],
+)
+
 executable('pw-profiler',
 	'pw-profiler.c',
 	c_args : [ '-D_GNU_SOURCE' ],
@@ -37,6 +44,15 @@ executable('pw-metadata',
 	install: true,
 	dependencies : [pipewire_dep],
 )
+
+if ncurses_dep.found()
+  executable('pw-top',
+	'pw-top.c',
+	c_args : [ '-D_GNU_SOURCE' ],
+	install: true,
+	dependencies : [pipewire_dep, ncurses_dep],
+  )
+endif
 
 if get_option('pw-cat') and sndfile_dep.found()
 

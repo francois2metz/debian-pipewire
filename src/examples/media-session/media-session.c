@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #if HAVE_PWD_H
 #include <pwd.h>
@@ -43,6 +44,7 @@
 #include <spa/node/node.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
+#include <spa/utils/json.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/debug/pod.h>
@@ -58,7 +60,8 @@
 
 #include "media-session.h"
 
-#define NAME "media-session"
+#define NAME		"media-session"
+#define SESSION_CONF	"media-session.conf"
 
 #define sm_object_emit(o,m,v,...) spa_hook_list_call(&(o)->hooks, struct sm_object_events, m, v, ##__VA_ARGS__)
 
@@ -72,11 +75,11 @@
 #define sm_media_session_emit_create(s,obj)		sm_media_session_emit(s, create, 0, obj)
 #define sm_media_session_emit_remove(s,obj)		sm_media_session_emit(s, remove, 0, obj)
 #define sm_media_session_emit_rescan(s,seq)		sm_media_session_emit(s, rescan, 0, seq)
+#define sm_media_session_emit_shutdown(s)		sm_media_session_emit(s, shutdown, 0)
 #define sm_media_session_emit_destroy(s)		sm_media_session_emit(s, destroy, 0)
 
 int sm_access_flatpak_start(struct sm_media_session *sess);
 int sm_access_portal_start(struct sm_media_session *sess);
-int sm_metadata_start(struct sm_media_session *sess);
 int sm_default_nodes_start(struct sm_media_session *sess);
 int sm_default_profile_start(struct sm_media_session *sess);
 int sm_default_routes_start(struct sm_media_session *sess);
@@ -112,6 +115,9 @@ struct sync {
 
 struct impl {
 	struct sm_media_session this;
+
+	struct pw_properties *conf;
+	struct pw_properties *modules;
 
 	struct pw_main_loop *loop;
 	struct spa_dbus *dbus;
@@ -315,6 +321,10 @@ int sm_object_destroy(struct sm_object *obj)
 		pw_proxy_unref(p);
 	if (h)
 		pw_proxy_unref(h);
+
+	obj->proxy = NULL;
+	obj->handle = NULL;
+
 	return 0;
 }
 
@@ -739,11 +749,13 @@ static void session_event_info(void *object, const struct pw_session_info *info)
 		i->version = PW_VERSION_SESSION_INFO;
 		i->id = info->id;
         }
-	i->change_mask = info->change_mask;
-	if (info->change_mask & PW_SESSION_CHANGE_MASK_PROPS) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
-		i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
+	if (info) {
+		i->change_mask = info->change_mask;
+		if (info->change_mask & PW_SESSION_CHANGE_MASK_PROPS) {
+			if (i->props)
+				pw_properties_free ((struct pw_properties *)i->props);
+			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
+		}
 	}
 
 	sess->obj.avail |= SM_SESSION_CHANGE_MASK_INFO;
@@ -814,16 +826,18 @@ static void endpoint_event_info(void *object, const struct pw_endpoint_info *inf
 		i->direction = info->direction;
 		i->flags = info->flags;
         }
-	i->change_mask = info->change_mask;
-	if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_SESSION) {
-		i->session_id = info->session_id;
-	}
-	if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
-		i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
-		if ((str = spa_dict_lookup(i->props, PW_KEY_PRIORITY_SESSION)) != NULL)
-			endpoint->priority = pw_properties_parse_int(str);
+	if (info) {
+		i->change_mask = info->change_mask;
+		if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_SESSION) {
+			i->session_id = info->session_id;
+		}
+		if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
+			if (i->props)
+				pw_properties_free ((struct pw_properties *)i->props);
+			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
+			if ((str = spa_dict_lookup(i->props, PW_KEY_PRIORITY_SESSION)) != NULL)
+				endpoint->priority = pw_properties_parse_int(str);
+		}
 	}
 
 	endpoint->obj.avail |= SM_ENDPOINT_CHANGE_MASK_INFO;
@@ -908,7 +922,9 @@ static void endpoint_stream_event_info(void *object, const struct pw_endpoint_st
 		stream->info->endpoint_id = info->endpoint_id;
 		stream->info->name = info->name ? strdup(info->name) : NULL;
         }
-	stream->info->change_mask = info->change_mask;
+	if (info) {
+		stream->info->change_mask = info->change_mask;
+	}
 
 	stream->obj.avail |= SM_ENDPOINT_CHANGE_MASK_INFO;
 	stream->obj.changed |= SM_ENDPOINT_CHANGE_MASK_INFO;
@@ -985,7 +1001,9 @@ static void endpoint_link_event_info(void *object, const struct pw_endpoint_link
 		link->info->input_endpoint_id = info->input_endpoint_id;
 		link->info->input_stream_id = info->input_stream_id;
 	}
-	link->info->change_mask = info->change_mask;
+	if (info) {
+		link->info->change_mask = info->change_mask;
+	}
 
 	link->obj.avail |= SM_ENDPOINT_LINK_CHANGE_MASK_INFO;
 	link->obj.changed |= SM_ENDPOINT_LINK_CHANGE_MASK_INFO;
@@ -1518,6 +1536,7 @@ static void proxy_link_destroy(void *data)
 	struct link *l = data;
 
 	spa_list_remove(&l->link);
+	spa_hook_remove(&l->listener);
 
 	if (l->endpoint_link) {
 		check_endpoint_link(l->endpoint_link);
@@ -1761,6 +1780,47 @@ int sm_media_session_remove_links(struct sm_media_session *sess,
 	return 0;
 }
 
+int sm_media_session_load_conf(struct sm_media_session *sess, const char *name,
+		struct pw_properties *conf)
+{
+	const char *dir;
+	char path[PATH_MAX];
+	int count, fd;
+	struct stat sbuf;
+	char *data;
+
+	if ((count = sm_media_session_load_state(sess, name, NULL, conf)) >= 0)
+		return count;
+
+	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
+		dir = PIPEWIRE_CONFIG_DIR;
+	if (dir == NULL)
+		return -ENOENT;
+
+	snprintf(path, sizeof(path)-1, "%s/media-session.d/%s", dir, name);
+	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)  {
+		pw_log_warn(NAME" %p: error loading config '%s': %m", sess, path);
+		return -errno;
+	}
+
+	pw_log_info(NAME" %p: loading config '%s'", sess, path);
+	if (fstat(fd, &sbuf) < 0)
+		goto error_close;
+	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
+		goto error_close;
+	close(fd);
+
+	count = pw_properties_update_string(conf, data, sbuf.st_size);
+	munmap(data, sbuf.st_size);
+
+	return count;
+
+error_close:
+	pw_log_debug("can't read file %s: %m", path);
+	close(fd);
+	return -errno;
+}
+
 static int state_dir(struct sm_media_session *sess)
 {
 	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
@@ -1792,6 +1852,10 @@ static int state_dir(struct sm_media_session *sess)
 				"%s/.config/pipewire-media-session/", home_dir);
 	}
 
+#ifndef O_PATH
+#define O_PATH 0
+#endif
+
 	if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
 		if (errno == ENOENT) {
 			pw_log_info("creating state directory %s", impl->state_dir);
@@ -1811,46 +1875,42 @@ static int state_dir(struct sm_media_session *sess)
 	impl->state_dir_fd = res;
 	return res;
 }
-int sm_media_session_load_state(struct sm_media_session *sess,
-		const char *name, struct pw_properties *props)
-{
-	int sfd, fd, count = 0;
-	FILE *f;
-	char line[1024];
 
-	pw_log_info(NAME" %p: loading state '%s'", sess, name);
+int sm_media_session_load_state(struct sm_media_session *sess,
+		const char *name, const char *prefix, struct pw_properties *props)
+{
+	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
+	int count, sfd, fd;
+	struct stat sbuf;
+	void *data;
+
 	if ((sfd = state_dir(sess)) < 0)
 		return sfd;
 
-	if ((fd = openat(sfd, name,  O_CLOEXEC | O_RDONLY)) < 0) {
-		pw_log_debug("can't open file %s: %m", name);
+	if ((fd = openat(sfd, name, O_CLOEXEC | O_RDONLY)) < 0) {
+		pw_log_debug("can't open file %s%s: %m", impl->state_dir, name);
 		return -errno;
 	}
-	f = fdopen(fd, "r");
-	while (fgets(line, sizeof(line)-1, f)) {
-		char *val, *key, *k, *p;
-		val = strrchr(line, '\n');
-		if (val)
-			*val = '\0';
+	pw_log_info(NAME" %p: loading state '%s%s'", sess, impl->state_dir, name);
+	if (fstat(fd, &sbuf) < 0)
+		goto error_close;
+	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
+		goto error_close;
+	close(fd);
 
-		key = k = p = line;
-		while (*p) {
-			if (*p == ' ')
-				break;
-			if (*p == '\\')
-				p++;
-			*k++ = *p++;
-		}
-		*k = '\0';
-		val = ++p;
-		count += pw_properties_set(props, key, val);
-	}
-	fclose(f);
+	count = pw_properties_update_string(props, data, sbuf.st_size);
+	munmap(data, sbuf.st_size);
+
 	return count;
+
+error_close:
+	pw_log_debug("can't read file %s: %m", name);
+	close(fd);
+	return -errno;
 }
 
 int sm_media_session_save_state(struct sm_media_session *sess,
-		const char *name, const struct pw_properties *props)
+		const char *name, const char *prefix, const struct pw_properties *props)
 {
 	const struct spa_dict_item *it;
 	char *tmp_name;
@@ -1869,15 +1929,18 @@ int sm_media_session_save_state(struct sm_media_session *sess,
 	}
 
 	f = fdopen(fd, "w");
+	fprintf(f, "{ \n");
 	spa_dict_for_each(it, &props->dict) {
-		const char *p = it->key;
-		while (*p) {
-			if (*p == ' ' || *p == '\\')
-				fputc('\\', f);
-			fprintf(f, "%c", *p++);
-		}
-		fprintf(f, " %s\n", it->value);
+		char key[1024];
+		if (prefix != NULL && strstr(it->key, prefix) != it->key)
+			continue;
+
+		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
+			continue;
+
+		fprintf(f, " %s: %s\n", key, it->value);
 	}
+	fprintf(f, "}\n");
 	fclose(f);
 
 	if (renameat(sfd, tmp_name, sfd, name) < 0) {
@@ -1968,7 +2031,8 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 {
 	struct impl *impl = data;
 
-	pw_log_error("error id:%u seq:%d res:%d (%s): %s",
+	pw_log(res == -ENOENT ? SPA_LOG_LEVEL_INFO : SPA_LOG_LEVEL_WARN,
+			"error id:%u seq:%d res:%d (%s): %s",
 			id, seq, res, spa_strerror(res), message);
 
 	if (id == PW_ID_CORE) {
@@ -2026,20 +2090,38 @@ static void session_shutdown(struct impl *impl)
 	struct sm_object *obj;
 
 	pw_log_info(NAME" %p", impl);
+	sm_media_session_emit_shutdown(impl);
 
 	spa_list_consume(obj, &impl->global_list, link)
 		sm_object_destroy(obj);
 
+	impl->this.metadata = NULL;
+
 	sm_media_session_emit_destroy(impl);
 
-	if (impl->registry)
+	if (impl->registry) {
+		spa_hook_remove(&impl->registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)impl->registry);
-	if (impl->policy_core)
+	}
+	if (impl->policy_core) {
+		spa_hook_remove(&impl->policy_listener);
+		spa_hook_remove(&impl->proxy_policy_listener);
 		pw_core_disconnect(impl->policy_core);
-	if (impl->monitor_core)
+	}
+	if (impl->monitor_core) {
+		spa_hook_remove(&impl->monitor_listener);
 		pw_core_disconnect(impl->monitor_core);
+	}
 	if (impl->this.info)
 		pw_core_info_free(impl->this.info);
+}
+
+static int sm_metadata_start(struct sm_media_session *sess)
+{
+	sess->metadata = sm_media_session_export_metadata(sess, "default");
+	if (sess->metadata == NULL)
+		return -errno;
+	return 0;
 }
 
 static int sm_pulse_bridge_start(struct sm_media_session *sess)
@@ -2057,20 +2139,79 @@ static void do_quit(void *data, int signal_number)
 	pw_main_loop_quit(impl->loop);
 }
 
-#define DEFAULT_ENABLED		"flatpak,"		\
-				"portal,"		\
-				"metadata,"		\
-				"default-nodes,"	\
-				"default-profile,"	\
-				"default-routes,"	\
-				"restore-stream,"	\
-				"alsa-acp,"		\
-				"alsa-seq,"		\
-				"v4l2,"			\
-				"suspend-node,"		\
-				"policy-node"
-#define EXTRA_ENABLED		""
-#define EXTRA_DISABLED		""
+static int load_spa_libs(struct impl *impl, const char *str)
+{
+	struct spa_json it[2];
+	char key[512], value[512];
+
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_object(&it[0], &it[1]) < 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
+		const char *val;
+		if (key[0] == '#') {
+			if (spa_json_next(&it[1], &val) <= 0)
+				break;
+		}
+		else if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
+			pw_log_debug("spa-libs: '%s' -> '%s'", key, value);
+			pw_context_add_spa_lib(impl->this.context, key, value);
+		}
+	}
+	return 0;
+}
+
+static int collect_modules(struct impl *impl, const char *str)
+{
+	struct spa_json it[3];
+	char key[512], value[512];
+	const char *dir, *val;
+	char check_path[PATH_MAX];
+	struct stat statbuf;
+	int count = 0;
+
+	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
+		dir = PIPEWIRE_CONFIG_DIR;
+	if (dir == NULL)
+		return -ENOENT;
+
+again:
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_object(&it[0], &it[1]) < 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
+		bool add = false;
+
+		if (key[0] == '#') {
+			add = false;
+		} else if (pw_properties_get(impl->modules, key) != NULL) {
+			add = true;
+		} else {
+			snprintf(check_path, sizeof(check_path),
+					"%s/media-session.d/%s", dir, key);
+			add = (stat(check_path, &statbuf) == 0);
+		}
+		if (add) {
+			if (spa_json_enter_array(&it[1], &it[2]) < 0)
+				continue;
+
+			while (spa_json_get_string(&it[2], value, sizeof(value)-1) > 0) {
+				if (value[0] == '#')
+					continue;
+				pw_properties_set(impl->modules, value, "true");
+			}
+		}
+		else if (spa_json_next(&it[1], &val) <= 0)
+			break;
+	}
+	/* twice to resolve groups in module list */
+	if (count++ == 0)
+		goto again;
+
+	return 0;
+}
 
 static const struct {
 	const char *name;
@@ -2087,8 +2228,7 @@ static const struct {
 	{ "default-routes", "restore default route", sm_default_routes_start, NULL },
 	{ "restore-stream", "restore stream settings", sm_restore_stream_start, NULL },
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
-	{ "alsa-pcm", "alsa pcm udev detection", sm_alsa_monitor_start, NULL },
-	{ "alsa-acp", "alsa card profile udev detection", sm_alsa_monitor_start, "alsa.use-acp=true" },
+	{ "alsa-monitor", "alsa card udev detection", sm_alsa_monitor_start, NULL },
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },
 	{ "libcamera", "libcamera udev detection", sm_libcamera_monitor_start, NULL },
 	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start, NULL },
@@ -2097,40 +2237,26 @@ static const struct {
 	{ "pulse-bridge", "accept pulseaudio clients", sm_pulse_bridge_start, NULL },
 };
 
-static int opt_contains(const char *opt, const char *val)
+static bool is_module_enabled(struct impl *impl, const char *val)
 {
-	const char *s, *state = NULL;
-	size_t len;
-	while((s = pw_split_walk(opt, ",", &len, &state)) != NULL) {
-		if (strncmp(val, s, len) == 0)
-			return 1;
-	}
-	return 0;
+	const char *str = pw_properties_get(impl->modules, val);
+	return str ? pw_properties_parse_bool(str) : false;
 }
 
-static bool is_opt_enabled(const char *enabled, const char *disabled, const char *val)
-{
-	return (opt_contains(DEFAULT_ENABLED, val) || opt_contains(enabled, val)) &&
-			!opt_contains(disabled, val);
-}
-
-static void show_help(const char *name, const char *enabled, const char *disabled)
+static void show_help(const char *name, struct impl *impl)
 {
 	size_t i;
 
         fprintf(stdout, "%s [options]\n"
              "  -h, --help                            Show this help\n"
-             "      --version                         Show version\n"
-             "  -e, --enabled                         Extra enabled options ('%s')\n"
-             "  -d, --disabled                        Extra disabled options ('%s')\n"
-             "  -p, --properties                      Extra properties as 'key=value { key=value }'\n",
-	     name, enabled, disabled);
+             "      --version                         Show version\n",
+	     name);
 
         fprintf(stdout,
              "\noptions: (*=enabled)\n");
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
 		fprintf(stdout, "\t  %c %-15.15s: %s\n",
-				is_opt_enabled(enabled, disabled, modules[i].name) ? '*' : ' ',
+				is_module_enabled(impl, modules[i].name) ? '*' : ' ',
 				modules[i].name, modules[i].desc);
 	}
 }
@@ -2139,17 +2265,12 @@ int main(int argc, char *argv[])
 {
 	struct impl impl = { 0, };
 	const struct spa_support *support;
+	const char *str;
 	uint32_t n_support;
 	int res = 0, c;
-	const char *opt_enabled = EXTRA_ENABLED;
-	const char *opt_disabled = EXTRA_DISABLED;
-	const char *opt_properties = NULL;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
 		{ "version",	no_argument,		NULL, 'V' },
-		{ "enabled",	required_argument,	NULL, 'e' },
-		{ "disabled",	required_argument,	NULL, 'd' },
-		{ "properties",	required_argument,	NULL, 'p' },
 		{ NULL, 0, NULL, 0}
 	};
         size_t i;
@@ -2157,10 +2278,26 @@ int main(int argc, char *argv[])
 
 	pw_init(&argc, &argv);
 
-	while ((c = getopt_long(argc, argv, "hVe:d:p:", long_options, NULL)) != -1) {
+	impl.state_dir_fd = -1;
+	impl.this.props = pw_properties_new(NULL, NULL);
+	if (impl.this.props == NULL)
+		return -1;
+
+	if ((impl.conf = pw_properties_new(NULL, NULL)) == NULL)
+		return -1;
+	sm_media_session_load_conf(&impl.this, SESSION_CONF, impl.conf);
+	if ((str = pw_properties_get(impl.conf, "properties")) != NULL)
+		pw_properties_update_string(impl.this.props, str, strlen(str));
+
+	if ((impl.modules = pw_properties_new("default", "true", NULL)) == NULL)
+		return -1;
+	if ((str = pw_properties_get(impl.conf, "modules")) != NULL)
+		collect_modules(&impl, str);
+
+	while ((c = getopt_long(argc, argv, "hV", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
-			show_help(argv[0], opt_enabled, opt_disabled);
+			show_help(argv[0], &impl);
 			return 0;
 		case 'V':
 			fprintf(stdout, "%s\n"
@@ -2170,25 +2307,10 @@ int main(int argc, char *argv[])
 				pw_get_headers_version(),
 				pw_get_library_version());
 			return 0;
-		case 'e':
-			opt_enabled = optarg;
-			break;
-		case 'd':
-			opt_disabled = optarg;
-			break;
-		case 'p':
-			opt_properties = optarg;
-			break;
 		default:
 			return -1;
 		}
 	}
-
-	impl.state_dir_fd = -1;
-
-	impl.this.props = pw_properties_new_string(opt_properties ? opt_properties : "");
-	if (impl.this.props == NULL)
-		return -1;
 
 	spa_dict_for_each(item, &impl.this.props->dict)
 		pw_log_info("  '%s' = '%s'", item->key, item->value);
@@ -2210,10 +2332,8 @@ int main(int argc, char *argv[])
 	if (impl.this.context == NULL)
 		return -1;
 
-	pw_context_add_spa_lib(impl.this.context, "api.bluez5.*", "bluez5/libspa-bluez5");
-	pw_context_add_spa_lib(impl.this.context, "api.alsa.*", "alsa/libspa-alsa");
-	pw_context_add_spa_lib(impl.this.context, "api.v4l2.*", "v4l2/libspa-v4l2");
-	pw_context_add_spa_lib(impl.this.context, "api.libcamera.*", "libcamera/libspa-libcamera");
+	if ((str = pw_properties_get(impl.conf, "spa-libs")) != NULL)
+		load_spa_libs(&impl, str);
 
 	pw_context_set_object(impl.this.context, SM_TYPE_MEDIA_SESSION, &impl);
 
@@ -2242,15 +2362,7 @@ int main(int argc, char *argv[])
 
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
 		const char *name = modules[i].name;
-		if (is_opt_enabled(opt_enabled, opt_disabled, name)) {
-			if (modules[i].props) {
-				struct pw_properties *props;
-				props = pw_properties_new_string(modules[i].props);
-				if (props) {
-					pw_properties_update(impl.this.props, &props->dict);
-					pw_properties_free(props);
-				}
-			}
+		if (is_module_enabled(&impl, name)) {
 			pw_log_info("enable: %s", name);
 			modules[i].start(&impl.this);
 		}
@@ -2269,6 +2381,8 @@ exit:
 	pw_map_clear(&impl.endpoint_links);
 	pw_map_clear(&impl.globals);
 	pw_properties_free(impl.this.props);
+	pw_properties_free(impl.conf);
+	pw_properties_free(impl.modules);
 
 	if (impl.state_dir_fd != -1)
 		close(impl.state_dir_fd);
